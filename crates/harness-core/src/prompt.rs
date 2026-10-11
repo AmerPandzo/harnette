@@ -93,7 +93,15 @@ Finish with a short summary of what you changed.
     )
 }
 
-pub fn review(slug: &str, round: u32, diff_path: &str, build: Option<&BuildSummary>) -> String {
+pub fn review(slug: &str, round: u32, diff_path: &str, build: Option<&BuildSummary>, changed: Option<&[String]>) -> String {
+    let focus = match changed {
+        Some([]) => "\n- Since your previous review no files changed; verify ticked findings and the build.".to_string(),
+        Some(files) => format!(
+            "\n- This is a re-review. Files changed since the previous review: {}. Look for new issues only in these files; for older code, only verify ticked findings.",
+            files.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")
+        ),
+        None => String::new(),
+    };
     let date = crate::journal::today();
     let build = match build {
         Some(b) => format!(
@@ -111,7 +119,7 @@ Do not modify any source file; you may edit only `.ai-tasks/{slug}.md`.
 Review the change for `.ai-tasks/{slug}.md`:
 - The full change since implementation started (new files included) is in `{diff_path}`. Read it.
 - Check it against the Problem, Proposed fix, Acceptance criteria and Implementation notes. Read source files as needed.
-- {build}
+- {build}{focus}
 
 Update the task doc:
 - For findings from earlier reviews that the implementer ticked, append ` Verified ✔` if the fix holds,
@@ -128,4 +136,21 @@ Update the task doc:
 Finish with one line: the verdict and the number of open findings by severity.
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_prompt_focuses_re_reviews() {
+        let first = review("T-1", 1, "d.patch", None, None);
+        assert!(!first.contains("re-review"));
+        let again = review("T-1", 2, "d.patch", None, Some(&["src/a.rs".to_string()]));
+        assert!(again.contains("Files changed since the previous review: `src/a.rs`"));
+        let none = review("T-1", 2, "d.patch", None, Some(&[]));
+        assert!(none.contains("no files changed"));
+        let red = review("T-1", 1, "d.patch", Some(&BuildSummary { ok: false, command: "mvn".into(), tail: "E".into() }), None);
+        assert!(red.contains("**RED**") && red.contains("Never approve a red build"));
+    }
 }

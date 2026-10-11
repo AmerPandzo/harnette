@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use harness_core::policy::{Policy, default_toml, policy_path};
+use harness_core::review::{Criterion, Finding, parse_criteria, parse_findings};
 use harness_core::tasks::{self, StatusKind, TaskSummary};
 use harness_core::watch::{TaskWatcher, watch_tasks};
 use harness_core::git::{self, Checkpoint};
@@ -158,6 +159,66 @@ async fn start_loop(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct FileStat {
+    path: String,
+    added: u32,
+    removed: u32,
+}
+
+#[derive(serde::Serialize)]
+struct ReviewData {
+    /// What the diff is against, in words.
+    base_label: String,
+    files: Vec<FileStat>,
+    patch: String,
+    truncated: bool,
+    findings: Vec<Finding>,
+    criteria: Vec<Criterion>,
+}
+
+const PATCH_LIMIT: usize = 2_000_000;
+
+/// The task's change against a base: `checkpoint` (before the first implement round), `head`,
+/// or a branch name (diffed from its merge-base with HEAD, like a pull request).
+#[tauri::command]
+fn task_review(repo: String, slug: String, base: String) -> Result<ReviewData, String> {
+    let repo = expand_home(&repo);
+    let md = tasks::read(&repo, &slug).map_err(err)?;
+    let findings = parse_findings(&md);
+    let criteria = parse_criteria(&md);
+    if !git::is_repo(&repo) {
+        return Ok(ReviewData {
+            base_label: "not a git repository".into(),
+            files: vec![],
+            patch: String::new(),
+            truncated: false,
+            findings,
+            criteria,
+        });
+    }
+    let (base_ref, base_label) = match base.trim() {
+        "" | "checkpoint" => match git::list_checkpoints(&repo, &slug).map_err(err)?.first() {
+            Some(c) => (c.git_ref.clone(), format!("checkpoint {} (before the first implement round)", c.round)),
+            None => (git::head(&repo).map_err(err)?.ok_or("no commits yet")?, "HEAD (no checkpoint yet)".into()),
+        },
+        "head" => (git::head(&repo).map_err(err)?.ok_or("no commits yet")?, "HEAD".into()),
+        branch => (git::merge_base(&repo, branch).map_err(err)?, format!("merge-base with {branch}")),
+    };
+    let files = git::numstat(&repo, &base_ref)
+        .map_err(err)?
+        .into_iter()
+        .map(|(path, added, removed)| FileStat { path, added, removed })
+        .collect();
+    let mut patch = git::diff(&repo, &base_ref).map_err(err)?;
+    let truncated = patch.len() > PATCH_LIMIT;
+    if truncated {
+        let cut = (0..=PATCH_LIMIT).rev().find(|i| patch.is_char_boundary(*i)).unwrap_or(0);
+        patch.truncate(cut);
+    }
+    Ok(ReviewData { base_label, files, patch, truncated, findings, criteria })
+}
+
 #[tauri::command]
 fn list_checkpoints(repo: String, slug: String) -> Result<Vec<Checkpoint>, String> {
     let repo = expand_home(&repo);
@@ -285,6 +346,7 @@ pub fn run() {
             start_loop,
             list_checkpoints,
             restore_checkpoint,
+            task_review,
             answer_permission,
             send_note,
             stop_run,

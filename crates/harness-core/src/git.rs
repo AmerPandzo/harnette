@@ -105,6 +105,49 @@ pub fn checkpoint(repo: &Path, slug: &str, round: u32) -> anyhow::Result<String>
     Ok(r)
 }
 
+pub fn reviewed_ref(slug: &str) -> String {
+    format!("refs/harness/{slug}/reviewed")
+}
+
+/// Remember the working tree the reviewer just saw, for incremental re-review.
+pub fn mark_reviewed(repo: &Path, slug: &str) -> anyhow::Result<()> {
+    let commit = snapshot(repo)?;
+    git(repo, ["update-ref", &reviewed_ref(slug), &commit])?;
+    Ok(())
+}
+
+/// Resolve a ref to a commit, or None when it does not exist.
+pub fn resolve(repo: &Path, r: &str) -> Option<String> {
+    git(repo, ["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")]).ok()
+}
+
+/// Where a branch forked from HEAD, like a pull request's base.
+pub fn merge_base(repo: &Path, branch: &str) -> anyhow::Result<String> {
+    git(repo, ["merge-base", "HEAD", branch])
+}
+
+/// Files that differ between `base` and the working tree now (new and deleted files included).
+pub fn changed_since(repo: &Path, base: &str) -> anyhow::Result<Vec<String>> {
+    let now = snapshot(repo)?;
+    let out = git(repo, ["diff", "--name-only", base, &now])?;
+    Ok(out.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+}
+
+/// `git diff --numstat` per file: (path, added, removed); binary files count as 0/0.
+pub fn numstat(repo: &Path, base: &str) -> anyhow::Result<Vec<(String, u32, u32)>> {
+    let now = snapshot(repo)?;
+    let out = git(repo, ["diff", "--numstat", "--find-renames", base, &now])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let mut p = l.splitn(3, '\t');
+            let added = p.next()?.parse().unwrap_or(0);
+            let removed = p.next()?.parse().unwrap_or(0);
+            Some((p.next()?.to_string(), added, removed))
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Checkpoint {
     pub round: u32,
@@ -200,6 +243,16 @@ pub(crate) mod tests {
         assert!(patch.contains("c.txt"));
         assert!(patch.contains("b.txt"));
         assert!(!patch.contains("ignored.txt"));
+
+        mark_reviewed(&repo, "T-1").unwrap();
+        assert_eq!(list_checkpoints(&repo, "T-1").unwrap().len(), 1, "the reviewed ref is not a checkpoint");
+        fs::write(repo.join("d.txt"), "after review\n").unwrap();
+        assert_eq!(changed_since(&repo, &reviewed_ref("T-1")).unwrap(), vec!["d.txt"]);
+        let stats = numstat(&repo, &r).unwrap();
+        assert!(stats.iter().any(|(p, a, _)| p == "c.txt" && *a == 1));
+        assert!(resolve(&repo, &reviewed_ref("T-1")).is_some());
+        assert!(resolve(&repo, "refs/harness/nope").is_none());
+        fs::remove_file(repo.join("d.txt")).unwrap();
 
         restore(&repo, &r).unwrap();
         assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");

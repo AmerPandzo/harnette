@@ -4,6 +4,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import DOMPurify from "dompurify";
   import { marked } from "marked";
+  import ReviewPane from "./ReviewPane.svelte";
   import { STATUS_LABELS, type Checkpoint, type StatusKind, type TaskSummary } from "./types";
 
   let {
@@ -26,6 +27,7 @@
   } = $props();
 
   let checkpoints = $state<Checkpoint[]>([]);
+  let view = $state<"doc" | "review">("doc");
   const runnable = $derived(["ready", "changes_requested", "in_review"].includes(task.status_kind));
 
   $effect(() => {
@@ -120,6 +122,10 @@
   <div class="bar">
     <div class="head">
       <span class="slug">{task.slug}</span>
+      <span class="seg">
+        <button class:on={view === "doc"} onclick={() => (view = "doc")}>Doc</button>
+        <button class:on={view === "review"} onclick={() => (view = "review")} disabled={editing}>Review</button>
+      </span>
       <select value={task.status_kind} onchange={setStatus} disabled={editing} title="Status line in the doc">
         {#if task.status_kind === "unknown"}<option value="unknown" disabled>{task.status || "No status"}</option>{/if}
         {#each Object.entries(STATUS_LABELS) as [kind, label] (kind)}
@@ -163,6 +169,8 @@
   {/if}
   {#if editing}
     <textarea bind:value={draft} spellcheck="false"></textarea>
+  {:else if view === "review"}
+    <ReviewPane {repo} slug={task.slug} {version} />
   {:else}
     <!-- eslint-disable-next-line svelte/no-at-html-tags -- sanitized above -->
     <article onclick={onDocClick} role="presentation">{@html html}</article>
@@ -198,6 +206,21 @@
   }
   select {
     padding: 4px 6px;
+  }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .seg button {
+    border: none;
+    border-radius: 0;
+    padding: 3px 10px;
+    font-size: 12px;
+  }
+  .seg button.on {
+    background: var(--accent-soft);
   }
   .actions {
     display: flex;

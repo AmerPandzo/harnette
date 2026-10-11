@@ -31,7 +31,7 @@ pub enum Mode {
     /// Implement the Proposed fix or the open review findings.
     Implement { round: u32, build_command: Option<String> },
     /// Fresh-session review of the change against the task doc.
-    Review { round: u32, diff_path: String, build: Option<BuildSummary> },
+    Review { round: u32, diff_path: String, build: Option<BuildSummary>, changed_since_last_review: Option<Vec<String>> },
 }
 
 /// What the reviewer is told about Harness's own build.
@@ -306,8 +306,12 @@ where
         Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
         Mode::Refine => prompt::refine(&cfg.slug),
         Mode::Implement { round, build_command } => prompt::implement(&cfg.slug, *round, build_command.as_deref()),
-        Mode::Review { round, diff_path, build } => prompt::review(&cfg.slug, *round, diff_path, build.as_ref()),
+        Mode::Review { round, diff_path, build, changed_since_last_review } => {
+            prompt::review(&cfg.slug, *round, diff_path, build.as_ref(), changed_since_last_review.as_deref())
+        }
     };
+    // The prompt goes to stdin, which the CLI does not echo; keep it for the audit trail.
+    journal.lock().unwrap().raw(&json!({ "harness_prompt": text }).to_string());
     let first = json!({ "type": "user", "message": { "role": "user", "content": text } });
     write_line(&inner, &first).await?;
 

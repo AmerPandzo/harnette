@@ -49,6 +49,7 @@ pub enum RunEvent {
     Alarm { alarm: String, message: String, action: String },
     Paused { reason: String },
     Resumed,
+    Info { message: String },
 }
 
 /// One line of agent output, classified.

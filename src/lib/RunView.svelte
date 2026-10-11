@@ -129,6 +129,8 @@
           <div class="ev sys">Paused: {e.reason}</div>
         {:else if e.kind === "resumed"}
           <div class="ev sys">Resumed</div>
+        {:else if e.kind === "info"}
+          <div class="ev sys">{e.message}</div>
         {:else if e.kind === "session_ended"}
           <div class="ended" class:err={!e.ok}>{e.ok ? "✓" : "■"} {e.summary}</div>
         {/if}

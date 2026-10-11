@@ -301,6 +301,10 @@ where
                     | RunEvent::StatusChanged { .. }
                     | RunEvent::SessionEnded { .. }
                     | RunEvent::Error { .. }
+                    | RunEvent::Alarm { .. }
+                    | RunEvent::Paused { .. }
+                    | RunEvent::Resumed
+                    | RunEvent::Info { .. }
             ) {
                 journal.lock().unwrap().event(&e);
             }
@@ -324,6 +328,20 @@ where
         s.end(&sink, ok, summary);
     });
     Ok(session)
+}
+
+/// Move fully verified earlier reviews into `<slug>.history.md` (workflow rule).
+fn archive_reviews(repo: &std::path::Path, slug: &str, sink: &Sink) -> anyhow::Result<()> {
+    let md = tasks::read(repo, slug)?;
+    if let Some((doc, moved)) = crate::review::archive_verified(&md) {
+        let history = tasks::tasks_dir(repo).join(format!("{slug}.history.md"));
+        let mut text = std::fs::read_to_string(&history).unwrap_or_else(|_| format!("# {slug} — review history\n\n"));
+        text.push_str(&moved);
+        std::fs::write(&history, text)?;
+        tasks::write(repo, slug, &doc)?;
+        sink(RunEvent::Info { message: format!("Moved fully verified reviews to {slug}.history.md") });
+    }
+    Ok(())
 }
 
 async fn run_agent(session: &Session, cfg: RunConfig, sink: &Sink) -> anyhow::Result<bool> {
@@ -425,7 +443,12 @@ async fn run_loop(
                     (Some(command), Some(b)) => Some(BuildSummary { ok: b.ok, command: command.clone(), tail: b.tail.clone() }),
                     _ => None,
                 };
-                let mode = Mode::Review { round: review_round, diff_path, build };
+                let reviewed = git::reviewed_ref(slug);
+                let changed_since_last_review = match git::resolve(repo, &reviewed) {
+                    Some(_) => Some(git::changed_since(repo, &reviewed)?),
+                    None => None,
+                };
+                let mode = Mode::Review { round: review_round, diff_path, build, changed_since_last_review };
                 let ok = run_agent(session, cfg.agent(repo, mode, session.remaining_usd()), sink).await?;
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
@@ -434,6 +457,8 @@ async fn run_loop(
                     bail!("The reviewer did not finish round {review_round}.");
                 }
 
+                git::mark_reviewed(repo, slug)?;
+                archive_reviews(repo, slug, sink)?;
                 let reviewer_status = status_of(repo, slug)?;
                 let (status, reason) = gate_status(reviewer_status, last_build.as_ref().map(|b| b.ok));
                 if status != reviewer_status {

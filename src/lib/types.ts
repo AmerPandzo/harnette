@@ -64,7 +64,8 @@ export type RunEvent =
   | { kind: "session_ended"; ok: boolean; summary: string }
   | { kind: "alarm"; alarm: string; message: string; action: "warn" | "pause" | "stop" }
   | { kind: "paused"; reason: string }
-  | { kind: "resumed" };
+  | { kind: "resumed" }
+  | { kind: "info"; message: string };
 
 export type UsageSummary = {
   day_tokens: number;

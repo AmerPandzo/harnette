@@ -9,6 +9,7 @@ pub mod journal;
 pub mod ledger;
 pub mod policy;
 pub mod prompt;
+pub mod review;
 pub mod session;
 pub mod tasks;
 pub mod watch;
