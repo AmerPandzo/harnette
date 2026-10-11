@@ -1,10 +1,10 @@
-//! PreToolUse hook for Claude Code: `harness-guard --repo <path> --role <role> [--slug <task>]`.
+//! PreToolUse hook for Claude Code: `kormilant-guard --repo <path> --role <role> [--slug <task>]`.
 //! Reads the hook JSON on stdin and prints the policy decision. Never fails open.
 
 use std::io::Read;
 use std::path::PathBuf;
 
-use harness_core::policy::{Role, hook_response};
+use kormilant_core::policy::{Role, hook_response};
 
 fn main() {
     let mut repo = None;

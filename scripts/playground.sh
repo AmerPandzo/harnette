@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Creates a small throwaway repo with task docs ready for each manual check in
-# .ai-tasks/phase-1-test-steps.md. Usage: scripts/playground.sh [dir]   (default /tmp/harness-playground)
+# .ai-tasks/phase-1-test-steps.md. Usage: scripts/playground.sh [dir]   (default /tmp/kormilant-playground)
 set -euo pipefail
-dir="${1:-/tmp/harness-playground}"
+dir="${1:-/tmp/kormilant-playground}"
 if [ -e "$dir" ]; then
   echo "$dir already exists; remove it first (rm -rf \"$dir\") or pass another path." >&2
   exit 1
@@ -11,10 +11,10 @@ mkdir -p "$dir/src" "$dir/.ai-tasks"
 cd "$dir"
 git init -q -b main
 printf '.ai-tasks/\n' >> .git/info/exclude
-commit() { git -c user.name="Harness Playground" -c user.email=playground@example.com commit -qm "$1"; }
+commit() { git -c user.name="Kormilant Playground" -c user.email=playground@example.com commit -qm "$1"; }
 
 cat > package.json <<'EOF'
-{ "name": "harness-playground", "type": "module", "scripts": { "test": "node --test" } }
+{ "name": "kormilant-playground", "type": "module", "scripts": { "test": "node --test" } }
 EOF
 cat > src/math.js <<'EOF'
 // Returns the absolute difference between a and b.

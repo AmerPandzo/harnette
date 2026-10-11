@@ -1,4 +1,4 @@
-//! Harness-owned build gate: agents' own test runs are not trusted, so the app runs the build itself.
+//! Kormilant-owned build gate: agents' own test runs are not trusted, so the app runs the build itself.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -79,7 +79,7 @@ mod tests {
     #[tokio::test]
     async fn runs_and_reports() {
         let dir = std::env::temp_dir();
-        let log = dir.join(format!("harness-build-{}.log", std::process::id()));
+        let log = dir.join(format!("kormilant-build-{}.log", std::process::id()));
         let cancel = Notify::new();
         let green = run_build(&dir, "echo hello", &log, &cancel).await.unwrap();
         assert!(green.ok);

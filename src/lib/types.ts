@@ -1,4 +1,4 @@
-// Mirrors harness_core types (serde snake_case).
+// Mirrors kormilant_core types (serde snake_case).
 
 export type StatusKind = "analysis" | "ready" | "in_review" | "changes_requested" | "done" | "unknown";
 

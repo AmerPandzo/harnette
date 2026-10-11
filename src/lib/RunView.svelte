@@ -5,7 +5,7 @@
   let { repo }: { repo: string } = $props();
 
   let slug = $state("");
-  let model = $state(remembered("harness.model", ""));
+  let model = $state(remembered("kormilant.model", ""));
   let ticket = $state("");
   let note = $state("");
   let feedEl: HTMLElement | undefined = $state();
@@ -25,7 +25,7 @@
 
   async function analyze(ev: Event) {
     ev.preventDefault();
-    remember("harness.model", model);
+    remember("kormilant.model", model);
     try {
       await startRun({ repo, slug: slug.trim(), mode: "analyze", ticket, model });
       ticket = "";

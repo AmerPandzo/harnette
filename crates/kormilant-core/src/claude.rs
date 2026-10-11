@@ -34,7 +34,7 @@ pub enum Mode {
     Review { round: u32, diff_path: String, build: Option<BuildSummary>, changed_since_last_review: Option<Vec<String>> },
 }
 
-/// What the reviewer is told about Harness's own build.
+/// What the reviewer is told about Kormilant's own build.
 #[derive(Debug, Clone)]
 pub struct BuildSummary {
     pub ok: bool,
@@ -64,7 +64,7 @@ pub struct RunConfig {
     pub ask_timeout: Option<Duration>,
     pub claude_bin: String,
     pub copilot_bin: String,
-    /// Path to `harness-guard`; found next to the running executable when unset.
+    /// Path to `kormilant-guard`; found next to the running executable when unset.
     pub guard_bin: Option<PathBuf>,
     /// Hard dollar cap the CLI enforces for this run (`--max-budget-usd`).
     pub max_budget_usd: Option<f64>,
@@ -235,22 +235,22 @@ pub(crate) fn exclude_ai_tasks(repo: &std::path::Path) {
     }
 }
 
-/// `harness-guard` sits next to the app binary (`target/debug/`), or one level up for examples.
+/// `kormilant-guard` sits next to the app binary (`target/debug/`), or one level up for examples.
 fn find_guard(cfg: &RunConfig) -> anyhow::Result<PathBuf> {
     if let Some(p) = &cfg.guard_bin {
         return Ok(p.clone());
     }
-    if let Some(p) = std::env::var_os("HARNESS_GUARD") {
+    if let Some(p) = std::env::var_os("KORMILANT_GUARD") {
         return Ok(PathBuf::from(p));
     }
-    let name = format!("harness-guard{}", std::env::consts::EXE_SUFFIX);
+    let name = format!("kormilant-guard{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe()?;
     exe.ancestors()
         .skip(1)
         .take(2)
         .map(|dir| dir.join(&name))
         .find(|p| p.is_file())
-        .with_context(|| format!("{name} not found next to {}; build it with `cargo build -p harness-core --bin harness-guard`", exe.display()))
+        .with_context(|| format!("{name} not found next to {}; build it with `cargo build -p kormilant-core --bin kormilant-guard`", exe.display()))
 }
 
 /// POSIX single-quote for the hook command line.
@@ -297,7 +297,7 @@ where
         .args(["--permission-prompts", "host", "--permission-prompt-tool", "stdio"])
         // User-level hooks and permission rules could decide prompts before we see them.
         .args(["--setting-sources", "project,local"])
-        // harness-guard sees every tool call; anything it cannot allow or deny comes back to us as a prompt.
+        // kormilant-guard sees every tool call; anything it cannot allow or deny comes back to us as a prompt.
         .args(["--settings", &guard_settings(&guard, &repo, role, &cfg.slug)]);
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
@@ -330,7 +330,7 @@ where
     emit(RunEvent::Started { run_id: run_id.clone(), slug: cfg.slug.clone() });
     let text = prompt_text(&cfg);
     // The prompt goes to stdin, which the CLI does not echo; keep it for the audit trail.
-    journal.lock().unwrap().raw(&json!({ "harness_prompt": text }).to_string());
+    journal.lock().unwrap().raw(&json!({ "kormilant_prompt": text }).to_string());
     let first = json!({ "type": "user", "message": { "role": "user", "content": text } });
     write_line(&inner, &first).await?;
 
@@ -376,7 +376,7 @@ where
                             if let RunEvent::Finished { ok: true, .. } = e {
                                 inner.succeeded.store(true, Ordering::SeqCst);
                             }
-                            // harness-guard decides allow/deny silently; mirror its verdict into the journal.
+                            // kormilant-guard decides allow/deny silently; mirror its verdict into the journal.
                             let guard_verdict = match &e {
                                 RunEvent::ToolUse { id, tool, summary, input } => {
                                     match policy.evaluate_task(role, tool, input, &repo, &slug) {
@@ -528,9 +528,9 @@ mod tests {
     #[test]
     fn hook_command_quotes_paths() {
         assert_eq!(sh_quote("/a b/it's"), r#"'/a b/it'\''s'"#);
-        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/harness-guard"), Path::new("/my repo"), Role::Analyst, "T-1")).unwrap();
+        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/kormilant-guard"), Path::new("/my repo"), Role::Analyst, "T-1")).unwrap();
         let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(cmd, "'/x/harness-guard' --repo '/my repo' --role analyst --slug 'T-1'");
+        assert_eq!(cmd, "'/x/kormilant-guard' --repo '/my repo' --role analyst --slug 'T-1'");
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "*");
     }
 }

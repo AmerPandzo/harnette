@@ -442,7 +442,7 @@ where
                     }
                     (Some(other), Some(id)) => {
                         // We announce no fs/terminal capabilities; anything else is unsupported.
-                        let err = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("{other} is not supported by Harness") } });
+                        let err = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("{other} is not supported by Kormilant") } });
                         let _ = write_msg(&inner, &err).await;
                     }
                     (None, Some(id)) => {
@@ -462,7 +462,7 @@ where
     if let Some((path, rules)) = standing_instructions(&policy.copilot.instructions) {
         prompt.push_str(&format!("\n\n## Standing instructions (from {path})\n\n{rules}\n"));
     }
-    journal.lock().unwrap().raw(&json!({ "harness_prompt": prompt }).to_string());
+    journal.lock().unwrap().raw(&json!({ "kormilant_prompt": prompt }).to_string());
     let driver = {
         let inner = inner.clone();
         let repo = repo.clone();
@@ -604,7 +604,7 @@ mod tests {
     }
 
     fn fake_repo(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("harness-acp-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kormilant-acp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".ai-tasks")).unwrap();
         std::fs::write(dir.join(".ai-tasks/T.md"), "# T\n\n**Status:** Ready for implementation\n").unwrap();

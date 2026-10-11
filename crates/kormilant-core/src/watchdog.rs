@@ -219,7 +219,7 @@ impl Watchdog {
         }
     }
 
-    /// Time-based checks; call every few seconds. `agent_running` is false while Harness builds or waits.
+    /// Time-based checks; call every few seconds. `agent_running` is false while Kormilant builds or waits.
     pub fn tick(&mut self, now: Instant, agent_running: bool) -> Vec<Alarm> {
         let minutes = now.duration_since(self.started).as_secs_f64() / 60.0;
         let mut alarms = self.threshold(
@@ -320,7 +320,7 @@ mod tests {
         w.set_paused(true, at(4));
         assert!(w.tick(at(7), true).iter().all(|a| a.kind != "idle"), "no idle alarm while paused");
         w.set_paused(false, at(7));
-        assert!(w.tick(at(7), false).iter().all(|a| a.kind != "idle"), "no idle alarm while Harness builds");
+        assert!(w.tick(at(7), false).iter().all(|a| a.kind != "idle"), "no idle alarm while Kormilant builds");
         let late = w.tick(at(8), true);
         assert!(late.iter().any(|a| a.kind == "minutes" && a.action == Action::Warn));
         let over = w.tick(at(10), true);

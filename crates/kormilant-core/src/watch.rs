@@ -39,7 +39,7 @@ mod tests {
 
     #[test]
     fn reports_doc_changes_but_not_run_journals() {
-        let repo = std::env::temp_dir().join(format!("harness-watch-{}", std::process::id()));
+        let repo = std::env::temp_dir().join(format!("kormilant-watch-{}", std::process::id()));
         let dir = tasks_dir(&repo);
         std::fs::create_dir_all(dir.join("runs/T-1")).unwrap();
         let (tx, rx) = mpsc::channel();

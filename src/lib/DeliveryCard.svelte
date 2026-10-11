@@ -49,7 +49,7 @@
       <ul class="files">
         {#each plan.files as f (f)}<li><code>{f}</code></li>{/each}
       </ul>
-      <p class="meta">Harness will run:</p>
+      <p class="meta">Kormilant will run:</p>
       <pre>{plan.commands.join("\n")}</pre>
       <p class="meta">Commit message:</p>
       <pre>{plan.message}</pre>

@@ -292,7 +292,7 @@
 
     <section>
       <h3>Git, reach and edits</h3>
-      <p class="hint">Git commands agents may never run (Harness does delivery itself):</p>
+      <p class="hint">Git commands agents may never run (Kormilant does delivery itself):</p>
       <div class="verbs">
         {#each gitVerbs as v (v)}
           <label class="verb"><input type="checkbox" checked={form.git.deny.includes(v)} onchange={() => toggleVerb(v)} /> {v}</label>
@@ -416,7 +416,7 @@
           }}
         />
       </div>
-      <p class="hint">Harness never force-pushes.</p>
+      <p class="hint">Kormilant never force-pushes.</p>
     </section>
 
     {#if roles.some((r) => workerOf(form!.roles[r]).agent === "copilot")}

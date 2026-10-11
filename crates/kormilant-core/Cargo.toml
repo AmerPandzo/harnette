@@ -1,8 +1,8 @@
 [package]
-name = "harness-core"
+name = "kormilant-core"
 version = "0.1.0"
 edition = "2024"
-description = "Harness core: agent adapters, policy, journal. No UI code."
+description = "Kormilant core: agent adapters, policy, journal. No UI code."
 
 [dependencies]
 anyhow = "1"

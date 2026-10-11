@@ -47,7 +47,7 @@ impl Session {
     }
 
     pub async fn note(&self, text: &str) -> anyhow::Result<()> {
-        self.current().context("No agent is running right now (Harness may be building).")?.note(text).await
+        self.current().context("No agent is running right now (Kormilant may be building).")?.note(text).await
     }
 
     pub fn stop(&self) {
@@ -60,7 +60,7 @@ impl Session {
     }
 
     /// The app is quitting: cancel the session and kill the agent synchronously, so no agent
-    /// (running or paused) outlives Harness.
+    /// (running or paused) outlives Kormilant.
     pub fn shutdown(&self) {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         if let Some(h) = self.current() {
@@ -334,11 +334,11 @@ pub fn next_step(status: StatusKind) -> Step {
     }
 }
 
-/// The status after a review, enforcing the build gate. Returns the status and why Harness overrode it.
+/// The status after a review, enforcing the build gate. Returns the status and why Kormilant overrode it.
 pub fn gate_status(reviewer: StatusKind, build_ok: Option<bool>) -> (StatusKind, Option<String>) {
     match reviewer {
         StatusKind::Done if build_ok == Some(false) => {
-            (StatusKind::ChangesRequested, Some("The build is red; Harness does not accept Done.".into()))
+            (StatusKind::ChangesRequested, Some("The build is red; Kormilant does not accept Done.".into()))
         }
         StatusKind::Done | StatusKind::ChangesRequested => (reviewer, None),
         _ => (StatusKind::ChangesRequested, Some("The reviewer did not set Done or Changes requested.".into())),
@@ -361,6 +361,7 @@ where
     if !git::is_repo(&repo) {
         bail!("{} is not a git repository; the run loop needs git for checkpoints.", repo.display());
     }
+    git::adopt_legacy_refs(&repo)?;
     if let Step::Stop(reason) = next_step(status_of(&repo, &cfg.slug)?) {
         bail!(reason);
     }
@@ -464,7 +465,7 @@ async fn run_agent(session: &Session, cfg: RunConfig, claude_model: Option<Strin
 }
 
 /// Run the policy's build command, record it for delivery and report it. None when no command is set.
-async fn harness_build(
+async fn kormilant_build(
     session: &Session,
     policy: &Policy,
     repo: &std::path::Path,
@@ -540,12 +541,12 @@ async fn run_loop(
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }
-                last_build = harness_build(session, policy, repo, slug, round, run_dir, sink).await?;
+                last_build = kormilant_build(session, policy, repo, slug, round, run_dir, sink).await?;
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }
                 tasks::set_status(repo, slug, StatusKind::InReview)?;
-                sink(RunEvent::StatusChanged { to: StatusKind::InReview.label().into(), by: "harness".into(), reason: None });
+                sink(RunEvent::StatusChanged { to: StatusKind::InReview.label().into(), by: "kormilant".into(), reason: None });
             }
             Step::Review => {
                 let review_round = round.max(1);
@@ -566,7 +567,7 @@ async fn run_loop(
 
                 // Work done outside the loop (e.g. by hand) is built before the review too.
                 if last_build.is_none() && policy.build.command.is_some() {
-                    last_build = harness_build(session, policy, repo, slug, review_round, run_dir, sink).await?;
+                    last_build = kormilant_build(session, policy, repo, slug, review_round, run_dir, sink).await?;
                     if session.cancelled() {
                         return Ok("Stopped by the human.".into());
                     }
@@ -596,7 +597,7 @@ async fn run_loop(
                 if status != reviewer_status {
                     tasks::set_status(repo, slug, status)?;
                 }
-                let by = if reason.is_some() { "harness" } else { "reviewer" };
+                let by = if reason.is_some() { "kormilant" } else { "reviewer" };
                 sink(RunEvent::StatusChanged { to: status.label().into(), by: by.into(), reason });
                 if status == StatusKind::ChangesRequested && rounds_done >= max_rounds {
                     return Ok(format!("Changes requested after {rounds_done} round(s); run.max_rounds reached."));

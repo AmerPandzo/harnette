@@ -1,6 +1,6 @@
-//! Terminal shell over harness-core, for testing the core without the GUI.
+//! Terminal shell over kormilant-core, for testing the core without the GUI.
 //!
-//! cargo run -p harness-core --example spike_cli -- <repo> <slug> <ticket-file | --refine | --loop | --deliver> [model]
+//! cargo run -p kormilant-core --example spike_cli -- <repo> <slug> <ticket-file | --refine | --loop | --deliver> [model]
 //!
 //! While it runs, type on stdin:
 //!   y / n          answer the oldest open permission request
@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use harness_core::{LoopConfig, Mode, RunConfig, RunEvent, start_loop, start_single};
+use kormilant_core::{LoopConfig, Mode, RunConfig, RunEvent, start_loop, start_single};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -25,10 +25,10 @@ async fn main() -> anyhow::Result<()> {
     let model = rest.iter().find(|a| !a.starts_with("--")).cloned();
     if ticket_file == "--deliver" {
         let repo = std::path::Path::new(repo);
-        let policy = harness_core::policy::Policy::load(repo)?;
-        let plan = harness_core::delivery::plan(repo, slug, &policy)?;
+        let policy = kormilant_core::policy::Policy::load(repo)?;
+        let plan = kormilant_core::delivery::plan(repo, slug, &policy)?;
         println!("{}", serde_json::to_string_pretty(&plan)?);
-        println!("{:?}", harness_core::delivery::execute(repo, &plan)?);
+        println!("{:?}", kormilant_core::delivery::execute(repo, &plan)?);
         return Ok(());
     }
 

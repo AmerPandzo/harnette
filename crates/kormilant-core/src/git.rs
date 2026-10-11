@@ -17,10 +17,10 @@ where
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo).args(args);
     // Snapshot commits must work even when the user has no git identity configured.
-    cmd.env("GIT_AUTHOR_NAME", "Harness")
-        .env("GIT_AUTHOR_EMAIL", "harness@localhost")
-        .env("GIT_COMMITTER_NAME", "Harness")
-        .env("GIT_COMMITTER_EMAIL", "harness@localhost");
+    cmd.env("GIT_AUTHOR_NAME", "Kormilant")
+        .env("GIT_AUTHOR_EMAIL", "kormilant@localhost")
+        .env("GIT_COMMITTER_NAME", "Kormilant")
+        .env("GIT_COMMITTER_EMAIL", "kormilant@localhost");
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }
@@ -47,7 +47,7 @@ impl TempIndex {
     fn new(repo: &Path, copy_real: bool) -> anyhow::Result<Self> {
         static N: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "harness-index-{}-{}",
+            "kormilant-index-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -86,7 +86,7 @@ pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
     let index = TempIndex::new(repo, true)?;
     git_env(repo, ["add", "-A"], Some(&index.0))?;
     let tree = git_env(repo, ["write-tree"], Some(&index.0))?;
-    let mut args = vec!["commit-tree".to_string(), tree, "-m".into(), "harness snapshot".into()];
+    let mut args = vec!["commit-tree".to_string(), tree, "-m".into(), "kormilant snapshot".into()];
     if let Some(h) = head(repo)? {
         args.extend(["-p".into(), h]);
     }
@@ -94,10 +94,10 @@ pub fn snapshot(repo: &Path) -> anyhow::Result<String> {
 }
 
 pub fn checkpoint_ref(slug: &str, round: u32) -> String {
-    format!("refs/harness/{slug}/{round}")
+    format!("refs/kormilant/{slug}/{round}")
 }
 
-/// Snapshot the working tree under `refs/harness/<slug>/<round>`.
+/// Snapshot the working tree under `refs/kormilant/<slug>/<round>`.
 pub fn checkpoint(repo: &Path, slug: &str, round: u32) -> anyhow::Result<String> {
     let commit = snapshot(repo)?;
     let r = checkpoint_ref(slug, round);
@@ -105,8 +105,25 @@ pub fn checkpoint(repo: &Path, slug: &str, round: u32) -> anyhow::Result<String>
     Ok(r)
 }
 
+/// Checkpoints made before the rename lived under `refs/harness/`; move them to `refs/kormilant/`.
+/// Runs when a repo is opened. A ref that already exists under the new name is left as it is.
+pub fn adopt_legacy_refs(repo: &Path) -> anyhow::Result<usize> {
+    let out = git(repo, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/harness/"])?;
+    let mut moved = 0;
+    for line in out.lines() {
+        let Some((old, commit)) = line.split_once(' ') else { continue };
+        let new = format!("refs/kormilant/{}", &old["refs/harness/".len()..]);
+        if resolve(repo, &new).is_none() {
+            git(repo, ["update-ref", &new, commit])?;
+            moved += 1;
+        }
+        git(repo, ["update-ref", "-d", old, commit])?;
+    }
+    Ok(moved)
+}
+
 pub fn reviewed_ref(slug: &str) -> String {
-    format!("refs/harness/{slug}/reviewed")
+    format!("refs/kormilant/{slug}/reviewed")
 }
 
 /// Remember the working tree the reviewer just saw, for incremental re-review.
@@ -152,7 +169,7 @@ pub fn commit_changes_since(repo: &Path, base: &str, files: &[String], message: 
         );
     }
     let tree = git_env(repo, ["write-tree"], Some(&index.0))?;
-    // No Harness identity here: the commit is the user's.
+    // No Kormilant identity here: the commit is the user's.
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -203,7 +220,7 @@ pub struct Checkpoint {
 pub fn list_checkpoints(repo: &Path, slug: &str) -> anyhow::Result<Vec<Checkpoint>> {
     let out = git(
         repo,
-        ["for-each-ref", "--format=%(refname) %(objectname) %(committerdate:unix)", &format!("refs/harness/{slug}/")],
+        ["for-each-ref", "--format=%(refname) %(objectname) %(committerdate:unix)", &format!("refs/kormilant/{slug}/")],
     )?;
     let mut cps: Vec<Checkpoint> = out
         .lines()
@@ -249,7 +266,7 @@ pub(crate) mod tests {
     use std::fs;
 
     pub(crate) fn temp_repo(name: &str) -> PathBuf {
-        let repo = std::env::temp_dir().join(format!("harness-git-{name}-{}", std::process::id()));
+        let repo = std::env::temp_dir().join(format!("kormilant-git-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&repo);
         fs::create_dir_all(&repo).unwrap();
         git(&repo, ["init", "-q"]).unwrap();
@@ -269,7 +286,7 @@ pub(crate) mod tests {
         let head_before = head(&repo).unwrap();
 
         let r = checkpoint(&repo, "T-1", 1).unwrap();
-        assert_eq!(r, "refs/harness/T-1/1");
+        assert_eq!(r, "refs/kormilant/T-1/1");
         // The user's index and HEAD are untouched: b.txt is still untracked, nothing staged.
         assert_eq!(git(&repo, ["diff", "--cached", "--name-only"]).unwrap(), "");
         assert!(git(&repo, ["status", "--porcelain"]).unwrap().contains("?? b.txt"));
@@ -295,7 +312,14 @@ pub(crate) mod tests {
         let stats = numstat(&repo, &r).unwrap();
         assert!(stats.iter().any(|(p, a, _)| p == "c.txt" && *a == 1));
         assert!(resolve(&repo, &reviewed_ref("T-1")).is_some());
-        assert!(resolve(&repo, "refs/harness/nope").is_none());
+        assert!(resolve(&repo, "refs/kormilant/nope").is_none());
+
+        let legacy = resolve(&repo, &r).unwrap();
+        git(&repo, ["update-ref", "refs/harness/T-2/1", &legacy]).unwrap();
+        git(&repo, ["update-ref", "refs/harness/T-1/1", &legacy]).unwrap();
+        assert_eq!(adopt_legacy_refs(&repo).unwrap(), 1, "T-1/1 already exists under the new name");
+        assert_eq!(list_checkpoints(&repo, "T-2").unwrap().len(), 1);
+        assert_eq!(git(&repo, ["for-each-ref", "refs/harness/"]).unwrap(), "");
         fs::remove_file(repo.join("d.txt")).unwrap();
 
         restore(&repo, &r).unwrap();

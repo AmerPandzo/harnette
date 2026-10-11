@@ -12,14 +12,14 @@
   import { answer, initRunEvents, onRunExit, resumeRun, run, startLoop, startRun, stopRun } from "$lib/run.svelte";
   import { fmtTokens, remember, remembered, type TaskSummary } from "$lib/types";
 
-  let repoInput = $state(remembered("harness.repo", ""));
+  let repoInput = $state(remembered("kormilant.repo", ""));
   let repo = $state(""); // the watched, resolved repo
   let repoError = $state("");
   let tasks = $state<TaskSummary[]>([]);
   let selected = $state<string | null>(null);
   let version = $state(0);
   let tab = $state<"board" | "run" | "policy" | "maintenance">("board");
-  let recent = $state<string[]>(JSON.parse(remembered("harness.recentRepos", "[]")));
+  let recent = $state<string[]>(JSON.parse(remembered("kormilant.recentRepos", "[]")));
   const repoName = (p: string) => p.split("/").filter(Boolean).at(-1) ?? p;
 
   let selectedTask = $derived(tasks.find((t) => t.slug === selected) ?? null);
@@ -52,9 +52,9 @@
       repoInput = repo;
       repoError = "";
       selected = null;
-      remember("harness.repo", repo);
+      remember("kormilant.repo", repo);
       recent = [repo, ...recent.filter((r) => r !== repo)].slice(0, 8);
-      remember("harness.recentRepos", JSON.stringify(recent));
+      remember("kormilant.recentRepos", JSON.stringify(recent));
       await refresh();
     } catch (e) {
       repoError = String(e);
@@ -69,7 +69,7 @@
   async function refine() {
     if (!selectedTask) return;
     try {
-      await startRun({ repo, slug: selectedTask.slug, mode: "refine", model: remembered("harness.model", "") });
+      await startRun({ repo, slug: selectedTask.slug, mode: "refine", model: remembered("kormilant.model", "") });
       tab = "run";
     } catch {
       tab = "run"; // the error shows in the Run view
@@ -79,7 +79,7 @@
   async function runTask(base = "") {
     if (!selectedTask) return;
     try {
-      await startLoop({ repo, slug: selectedTask.slug, model: remembered("harness.model", ""), base });
+      await startLoop({ repo, slug: selectedTask.slug, model: remembered("kormilant.model", ""), base });
     } catch {}
     tab = "run";
   }
@@ -102,7 +102,7 @@
 
 <div class="app">
   <header>
-    <div class="brand">Harness</div>
+    <div class="brand">Kormilant</div>
     <form class="repo" onsubmit={(e) => (e.preventDefault(), connect(repoInput))}>
       <input bind:value={repoInput} placeholder="Choose a repository or type ~/path" />
       <button type="button" onclick={chooseRepo}>Choose…</button>

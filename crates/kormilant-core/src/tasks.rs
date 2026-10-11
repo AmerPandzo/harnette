@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn list_skips_runs_history_and_junk() {
-        let repo = std::env::temp_dir().join(format!("harness-tasks-{}", std::process::id()));
+        let repo = std::env::temp_dir().join(format!("kormilant-tasks-{}", std::process::id()));
         let dir = tasks_dir(&repo);
         fs::create_dir_all(dir.join("runs/T-1")).unwrap();
         fs::write(dir.join("T-1.md"), DOC).unwrap();

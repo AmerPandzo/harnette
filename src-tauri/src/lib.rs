@@ -1,18 +1,18 @@
-//! Tauri shell: exposes harness-core runs and task docs to the web UI
+//! Tauri shell: exposes kormilant-core runs and task docs to the web UI
 //! as commands plus `run-event` / `tasks-changed` events.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use harness_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
-use harness_core::review::{Criterion, Finding, parse_criteria, parse_findings};
-use harness_core::tasks::{self, StatusKind, TaskSummary};
-use harness_core::watch::{TaskWatcher, watch_tasks};
-use harness_core::delivery::{self, Outcome, Plan};
-use harness_core::git::{self, Checkpoint};
-use harness_core::ledger::{self, Entry, Summary};
-use harness_core::watchdog::PriorUsage;
-use harness_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
+use kormilant_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
+use kormilant_core::review::{Criterion, Finding, parse_criteria, parse_findings};
+use kormilant_core::tasks::{self, StatusKind, TaskSummary};
+use kormilant_core::watch::{TaskWatcher, watch_tasks};
+use kormilant_core::delivery::{self, Outcome, Plan};
+use kormilant_core::git::{self, Checkpoint};
+use kormilant_core::ledger::{self, Entry, Summary};
+use kormilant_core::watchdog::PriorUsage;
+use kormilant_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
@@ -27,7 +27,7 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 }
 
 fn ledger_path(app: &AppHandle) -> PathBuf {
-    app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("harness")).join("usage.jsonl")
+    app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("kormilant")).join("usage.jsonl")
 }
 
 fn now_ms() -> u64 {
@@ -74,20 +74,20 @@ fn on_event(app: &AppHandle, event: RunEvent) {
     match &event {
         RunEvent::Alarm { message, action, .. } => {
             let title = match action.as_str() {
-                "pause" => "Harness: paused",
-                "stop" => "Harness: stopped",
-                _ => "Harness: warning",
+                "pause" => "Kormilant: paused",
+                "stop" => "Kormilant: stopped",
+                _ => "Kormilant: warning",
             };
             notify(app, title, message);
         }
-        RunEvent::PermissionAsk { tool, summary, .. } => notify(app, &format!("Harness: allow {tool}?"), summary),
-        RunEvent::Build { ok: false, command, .. } => notify(app, "Harness: build is red", command),
-        RunEvent::DeliveryReady { mode, branch, .. } => notify(app, "Harness: ready to deliver", &format!("{mode} to {branch}: approve in the app")),
+        RunEvent::PermissionAsk { tool, summary, .. } => notify(app, &format!("Kormilant: allow {tool}?"), summary),
+        RunEvent::Build { ok: false, command, .. } => notify(app, "Kormilant: build is red", command),
+        RunEvent::DeliveryReady { mode, branch, .. } => notify(app, "Kormilant: ready to deliver", &format!("{mode} to {branch}: approve in the app")),
         RunEvent::Delivered { branch, pr_url, .. } => {
-            notify(app, "Harness: delivered", pr_url.as_deref().unwrap_or(branch));
+            notify(app, "Kormilant: delivered", pr_url.as_deref().unwrap_or(branch));
         }
         RunEvent::SessionEnded { ok, summary } => {
-            notify(app, if *ok { "Harness: finished" } else { "Harness: stopped" }, summary);
+            notify(app, if *ok { "Kormilant: finished" } else { "Kormilant: stopped" }, summary);
         }
         _ => {}
     }
@@ -311,6 +311,8 @@ fn watch_repo(app: AppHandle, state: State<'_, AppState>, repo: String) -> Resul
     if !path.is_dir() {
         return Err(format!("not a directory: {}", path.display()));
     }
+    // Not every folder is a git repo; a failure here only means there is nothing to adopt.
+    let _ = git::adopt_legacy_refs(&path);
     let watcher = watch_tasks(&path, move || {
         let _ = app.emit("tasks-changed", ());
     })
@@ -351,7 +353,7 @@ fn read_policy(repo: String) -> Result<(String, bool), String> {
     }
 }
 
-/// Validates before writing, so a typo never reaches harness-guard.
+/// Validates before writing, so a typo never reaches kormilant-guard.
 #[tauri::command]
 fn save_policy(repo: String, text: String) -> Result<(), String> {
     Policy::from_toml(&text).map_err(err)?;
