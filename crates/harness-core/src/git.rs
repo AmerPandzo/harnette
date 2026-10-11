@@ -121,6 +121,50 @@ pub fn resolve(repo: &Path, r: &str) -> Option<String> {
     git(repo, ["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")]).ok()
 }
 
+/// The tree a commit points at (two snapshots of the same files share it).
+pub fn tree_of(repo: &Path, commit: &str) -> anyhow::Result<String> {
+    git(repo, ["rev-parse", &format!("{commit}^{{tree}}")])
+}
+
+/// Commit only what changed between `base` and the working tree (in `files`) on top of HEAD,
+/// with the user's own git identity. Work the user had before `base` stays out of the commit.
+/// Returns the new commit; no ref, index or file is changed.
+pub fn commit_changes_since(repo: &Path, base: &str, files: &[String], message: &str) -> anyhow::Result<String> {
+    let head = head(repo)?.context("the repository has no commits yet")?;
+    let now = snapshot(repo)?;
+    let mut args: Vec<&str> = vec!["diff", "--binary", "--no-color", "--no-renames", base, &now, "--"];
+    args.extend(files.iter().map(String::as_str));
+    let patch = git(repo, &args)?;
+    let index = TempIndex::new(repo, false)?;
+    let patch_file = PathBuf::from(format!("{}.patch", index.0.display()));
+    std::fs::write(&patch_file, format!("{patch}\n"))?;
+    git_env(repo, ["read-tree", &head], Some(&index.0))?;
+    // 3-way lets edits next to (not on) the user's own uncommitted lines apply; true overlaps still fail.
+    let applied = git_env(repo, ["apply", "--cached", "--binary", "--3way", &patch_file.display().to_string()], Some(&index.0));
+    let _ = std::fs::remove_file(&patch_file);
+    if let Err(e) = applied {
+        let msg = format!("{e:#}");
+        // `git apply --3way` lists the files it could not merge as `U <path>`.
+        let conflicts: Vec<&str> = msg.lines().filter_map(|l| l.trim().strip_prefix("U ")).collect();
+        let which = if conflicts.is_empty() { files.join(", ") } else { conflicts.join(", ") };
+        bail!(
+            "The task's changes overlap uncommitted changes you made before the task in {which}. Commit or stash your own changes in that file first, then deliver."
+        );
+    }
+    let tree = git_env(repo, ["write-tree"], Some(&index.0))?;
+    // No Harness identity here: the commit is the user's.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit-tree", &tree, "-p", &head, "-m", message])
+        .output()
+        .context("could not run git")?;
+    if !out.status.success() {
+        bail!("git commit-tree failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Where a branch forked from HEAD, like a pull request's base.
 pub fn merge_base(repo: &Path, branch: &str) -> anyhow::Result<String> {
     git(repo, ["merge-base", "HEAD", branch])

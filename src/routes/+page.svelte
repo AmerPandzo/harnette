@@ -4,6 +4,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import Board from "$lib/Board.svelte";
+  import DeliveryCard from "$lib/DeliveryCard.svelte";
   import MaintenanceView from "$lib/MaintenanceView.svelte";
   import PolicyView from "$lib/PolicyView.svelte";
   import RunView from "$lib/RunView.svelte";
@@ -22,6 +23,16 @@
   const repoName = (p: string) => p.split("/").filter(Boolean).at(-1) ?? p;
 
   let selectedTask = $derived(tasks.find((t) => t.slug === selected) ?? null);
+  /** Slug whose delivery card is open. */
+  let delivering = $state<string | null>(null);
+
+  $effect(() => {
+    // A loop that ends Done with approval = "ask" opens the card.
+    if (run.deliveryReady) {
+      delivering = run.deliveryReady.slug;
+      run.deliveryReady = null;
+    }
+  });
   const pct = (x: number) => `${Math.round(x * 100)}%`;
 
   async function refresh() {
@@ -160,6 +171,10 @@
     </div>
   {/if}
 
+  {#if delivering && repo}
+    <DeliveryCard {repo} slug={delivering} onclose={() => ((delivering = null), refresh())} />
+  {/if}
+
   {#each run.asks as a (a.request_id)}
     <div class="ask">
       <div>
@@ -190,7 +205,7 @@
             <Board {tasks} {selected} onselect={(s) => (selected = selected === s ? null : s)} />
           </div>
           {#if selectedTask}
-            <TaskDetail {repo} task={selectedTask} {version} busy={run.running} onrefine={refine} onrun={runTask} onclose={() => (selected = null)} />
+            <TaskDetail {repo} task={selectedTask} {version} busy={run.running} onrefine={refine} onrun={runTask} ondeliver={() => (delivering = selectedTask?.slug ?? null)} onclose={() => (selected = null)} />
           {/if}
         </div>
       {/if}

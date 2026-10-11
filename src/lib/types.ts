@@ -65,7 +65,21 @@ export type RunEvent =
   | { kind: "alarm"; alarm: string; message: string; action: "warn" | "pause" | "stop" }
   | { kind: "paused"; reason: string }
   | { kind: "resumed" }
-  | { kind: "info"; message: string };
+  | { kind: "info"; message: string }
+  | { kind: "delivery_ready"; mode: string; branch: string; files: string[]; commands: string[] }
+  | { kind: "delivered"; branch: string; commit: string | null; pushed: boolean; pr_url: string | null };
+
+export type DeliveryPlan = {
+  slug: string;
+  mode: string;
+  branch: string;
+  create_branch: boolean;
+  files: string[];
+  message: string;
+  pr_title: string;
+  pr_body: string;
+  commands: string[];
+};
 
 export type UsageSummary = {
   day_tokens: number;

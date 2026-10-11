@@ -14,6 +14,7 @@
     busy,
     onrefine,
     onrun,
+    ondeliver,
     onclose,
   }: {
     repo: string;
@@ -23,6 +24,7 @@
     busy: boolean;
     onrefine: () => void;
     onrun: () => void;
+    ondeliver: () => void;
     onclose: () => void;
   } = $props();
 
@@ -149,6 +151,9 @@
           disabled={busy || !runnable}
           title="Implement → build → review until Done">Run</button
         >
+        {#if task.status_kind === "done"}
+          <button onclick={ondeliver} disabled={busy} title="Commit, push or open a PR, per [delivery] in the policy">Deliver…</button>
+        {/if}
         <button onclick={edit}>Edit</button>
         <button onclick={onclose} title="Close">✕</button>
       {/if}

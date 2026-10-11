@@ -8,6 +8,7 @@ use harness_core::policy::{Policy, default_toml, policy_path};
 use harness_core::review::{Criterion, Finding, parse_criteria, parse_findings};
 use harness_core::tasks::{self, StatusKind, TaskSummary};
 use harness_core::watch::{TaskWatcher, watch_tasks};
+use harness_core::delivery::{self, Outcome, Plan};
 use harness_core::git::{self, Checkpoint};
 use harness_core::ledger::{self, Entry, Summary};
 use harness_core::watchdog::PriorUsage;
@@ -81,6 +82,10 @@ fn on_event(app: &AppHandle, event: RunEvent) {
         }
         RunEvent::PermissionAsk { tool, summary, .. } => notify(app, &format!("Harness: allow {tool}?"), summary),
         RunEvent::Build { ok: false, command, .. } => notify(app, "Harness: build is red", command),
+        RunEvent::DeliveryReady { mode, branch, .. } => notify(app, "Harness: ready to deliver", &format!("{mode} to {branch}: approve in the app")),
+        RunEvent::Delivered { branch, pr_url, .. } => {
+            notify(app, "Harness: delivered", pr_url.as_deref().unwrap_or(branch));
+        }
         RunEvent::SessionEnded { ok, summary } => {
             notify(app, if *ok { "Harness: finished" } else { "Harness: stopped" }, summary);
         }
@@ -219,6 +224,26 @@ fn task_review(repo: String, slug: String, base: String) -> Result<ReviewData, S
     Ok(ReviewData { base_label, files, patch, truncated, findings, criteria })
 }
 
+/// What delivery would do now, or why it is refused (gate).
+#[tauri::command]
+fn delivery_plan(repo: String, slug: String) -> Result<Plan, String> {
+    let repo = expand_home(&repo);
+    let policy = Policy::load(&repo).map_err(err)?;
+    delivery::plan(&repo, &slug, &policy).map_err(err)
+}
+
+/// Re-checks the gate and delivers. Pushing happens only if the repo's policy says push or pr.
+#[tauri::command]
+fn deliver(state: State<'_, AppState>, repo: String, slug: String) -> Result<Outcome, String> {
+    if busy(&state) {
+        return Err("Wait for the running session to finish.".into());
+    }
+    let repo = expand_home(&repo);
+    let policy = Policy::load(&repo).map_err(err)?;
+    let plan = delivery::plan(&repo, &slug, &policy).map_err(err)?;
+    delivery::execute(&repo, &plan).map_err(err)
+}
+
 #[tauri::command]
 fn list_checkpoints(repo: String, slug: String) -> Result<Vec<Checkpoint>, String> {
     let repo = expand_home(&repo);
@@ -347,6 +372,8 @@ pub fn run() {
             list_checkpoints,
             restore_checkpoint,
             task_review,
+            delivery_plan,
+            deliver,
             answer_permission,
             send_note,
             stop_run,

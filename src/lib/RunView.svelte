@@ -131,6 +131,10 @@
           <div class="ev sys">Resumed</div>
         {:else if e.kind === "info"}
           <div class="ev sys">{e.message}</div>
+        {:else if e.kind === "delivery_ready"}
+          <div class="ev note">Ready to deliver ({e.mode} to <code>{e.branch}</code>, {e.files.length} file{e.files.length === 1 ? "" : "s"}): approve in the banner or from the task.</div>
+        {:else if e.kind === "delivered"}
+          <div class="ended">Delivered to <code>{e.branch}</code>{e.commit ? ` · ${e.commit.slice(0, 8)}` : ""}{e.pushed ? " · pushed" : ""}{e.pr_url ? ` · ${e.pr_url}` : ""}</div>
         {:else if e.kind === "session_ended"}
           <div class="ended" class:err={!e.ok}>{e.ok ? "✓" : "■"} {e.summary}</div>
         {/if}

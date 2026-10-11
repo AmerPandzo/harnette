@@ -21,6 +21,8 @@ export const run = $state({
   tokens: 0,
   usd: 0,
   role: "",
+  /** A loop finished Done and delivery waits for approval. */
+  deliveryReady: null as { slug: string } | null,
   finished: null as Finished | null,
   ended: null as { ok: boolean; summary: string } | null,
 });
@@ -53,6 +55,8 @@ export function initRunEvents() {
     if (e.kind === "paused") run.paused = e.reason;
     if (e.kind === "resumed") run.paused = null;
     if (e.kind === "phase") run.role = e.role;
+    if (e.kind === "delivery_ready") run.deliveryReady = { slug: run.slug };
+    if (e.kind === "delivered") run.deliveryReady = null;
     if (e.kind === "permission_ask") run.asks.push({ request_id: e.request_id, tool: e.tool, summary: e.summary });
     if (e.kind === "permission_answered") run.asks = run.asks.filter((a) => a.request_id !== e.request_id);
     if (e.kind === "quota") run.quota = { status: e.status, five_hour: e.five_hour, seven_day: e.seven_day };

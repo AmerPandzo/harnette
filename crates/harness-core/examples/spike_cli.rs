@@ -1,6 +1,6 @@
 //! Terminal shell over harness-core, for testing the core without the GUI.
 //!
-//! cargo run -p harness-core --example spike_cli -- <repo> <slug> <ticket-file | --refine | --loop> [model]
+//! cargo run -p harness-core --example spike_cli -- <repo> <slug> <ticket-file | --refine | --loop | --deliver> [model]
 //!
 //! While it runs, type on stdin:
 //!   y / n          answer the oldest open permission request
@@ -19,9 +19,17 @@ use tokio::sync::mpsc;
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [repo, slug, ticket_file, rest @ ..] = args.as_slice() else {
-        anyhow::bail!("usage: spike_cli <repo> <slug> <ticket-file | --refine | --loop> [model]");
+        anyhow::bail!("usage: spike_cli <repo> <slug> <ticket-file | --refine | --loop | --deliver> [model]");
     };
     let model = rest.first().cloned();
+    if ticket_file == "--deliver" {
+        let repo = std::path::Path::new(repo);
+        let policy = harness_core::policy::Policy::load(repo)?;
+        let plan = harness_core::delivery::plan(repo, slug, &policy)?;
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        println!("{:?}", harness_core::delivery::execute(repo, &plan)?);
+        return Ok(());
+    }
 
     let open_asks = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<()>();

@@ -3,6 +3,7 @@
 
 pub mod build;
 pub mod claude;
+pub mod delivery;
 pub mod event;
 pub mod git;
 pub mod journal;

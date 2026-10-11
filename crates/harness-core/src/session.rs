@@ -305,6 +305,8 @@ where
                     | RunEvent::Paused { .. }
                     | RunEvent::Resumed
                     | RunEvent::Info { .. }
+                    | RunEvent::DeliveryReady { .. }
+                    | RunEvent::Delivered { .. }
             ) {
                 journal.lock().unwrap().event(&e);
             }
@@ -317,7 +319,12 @@ where
     let run_dir = journal.lock().unwrap().dir().to_path_buf();
     tokio::spawn(async move {
         let (ok, summary) = match run_loop(&s, &cfg, &repo, &policy, &run_dir, &sink).await {
-            Ok(summary) => (true, summary),
+            Ok(summary) => {
+                if !s.cancelled() && status_of(&repo, &cfg.slug).ok() == Some(StatusKind::Done) {
+                    offer_delivery(&repo, &cfg.slug, &sink);
+                }
+                (true, summary)
+            }
             Err(e) => {
                 let msg = format!("{e:#}");
                 sink(RunEvent::Error { message: msg.clone() });
@@ -328,6 +335,27 @@ where
         s.end(&sink, ok, summary);
     });
     Ok(session)
+}
+
+/// After Done: deliver automatically, or offer the plan for approval, as `[delivery]` says.
+fn offer_delivery(repo: &std::path::Path, slug: &str, sink: &Sink) {
+    use crate::policy::{Approval, DeliveryMode};
+    // Re-read the policy: the human may have changed delivery settings during the loop.
+    let policy = match Policy::load(repo) {
+        Ok(p) => p,
+        Err(e) => return sink(RunEvent::Error { message: format!("{e:#}") }),
+    };
+    if policy.delivery.mode == DeliveryMode::None {
+        return;
+    }
+    match crate::delivery::plan(repo, slug, &policy) {
+        Err(e) => sink(RunEvent::Info { message: format!("Not delivered: {e:#}") }),
+        Ok(plan) if policy.delivery.approval == Approval::Auto => match crate::delivery::execute(repo, &plan) {
+            Ok(o) => sink(RunEvent::Delivered { branch: o.branch, commit: o.commit, pushed: o.pushed, pr_url: o.pr_url }),
+            Err(e) => sink(RunEvent::Error { message: format!("Delivery failed: {e:#}") }),
+        },
+        Ok(plan) => sink(RunEvent::DeliveryReady { mode: plan.mode, branch: plan.branch, files: plan.files, commands: plan.commands }),
+    }
 }
 
 /// Move fully verified earlier reviews into `<slug>.history.md` (workflow rule).
@@ -408,6 +436,16 @@ async fn run_loop(
                         build::check_requires(&policy.build.requires)?;
                         let log = run_dir.join(format!("build-{round}.log"));
                         let outcome = build::run_build(repo, command, &log, &session.inner.cancel).await?;
+                        let tree = git::tree_of(repo, &git::snapshot(repo)?)?;
+                        let ts_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        crate::delivery::record_build(
+                            repo,
+                            slug,
+                            &crate::delivery::LastBuild { ok: outcome.ok, command: command.clone(), tree, ts_ms },
+                        )?;
                         sink(RunEvent::Build {
                             ok: outcome.ok,
                             command: command.clone(),

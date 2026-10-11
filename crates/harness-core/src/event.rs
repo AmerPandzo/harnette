@@ -50,6 +50,8 @@ pub enum RunEvent {
     Paused { reason: String },
     Resumed,
     Info { message: String },
+    DeliveryReady { mode: String, branch: String, files: Vec<String>, commands: Vec<String> },
+    Delivered { branch: String, commit: Option<String>, pushed: bool, pr_url: Option<String> },
 }
 
 /// One line of agent output, classified.
