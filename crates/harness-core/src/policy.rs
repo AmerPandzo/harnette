@@ -109,6 +109,67 @@ pub struct Roles {
     pub on_quota_exhausted: OnQuota,
 }
 
+impl Roles {
+    /// The worker configured for a role (validated when the policy loads).
+    pub fn worker(&self, role: Role) -> Worker {
+        let spec = match role {
+            Role::Analyst => &self.analyst,
+            Role::Implementer => &self.implementer,
+            Role::Reviewer => &self.reviewer,
+        };
+        Worker::parse(spec).unwrap_or_default()
+    }
+}
+
+/// Which agent CLI fills a role: `claude`, `claude:<model>`, `copilot` or `copilot:<model>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Worker {
+    pub agent: Agent,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Agent {
+    #[default]
+    Claude,
+    Copilot,
+}
+
+impl Agent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Copilot => "copilot",
+        }
+    }
+}
+
+impl Worker {
+    pub fn parse(spec: &str) -> anyhow::Result<Self> {
+        let (name, model) = match spec.trim().split_once(':') {
+            Some((n, m)) => (n.trim(), Some(m.trim()).filter(|m| !m.is_empty()).map(String::from)),
+            None => (spec.trim(), None),
+        };
+        let agent = match name {
+            "claude" => Agent::Claude,
+            "copilot" => Agent::Copilot,
+            other => anyhow::bail!("unknown worker {other:?}: use \"claude\", \"copilot\", or \"<worker>:<model>\""),
+        };
+        Ok(Self { agent, model })
+    }
+
+    pub fn claude() -> Self {
+        Self::default()
+    }
+
+    pub fn label(&self) -> String {
+        match &self.model {
+            Some(m) => format!("{}:{m}", self.agent.as_str()),
+            None => self.agent.as_str().to_string(),
+        }
+    }
+}
+
 impl Default for Roles {
     fn default() -> Self {
         Self {
@@ -275,9 +336,9 @@ pub fn default_toml() -> &'static str {
 
 [roles]                       # factory of one: the same worker may fill every role
 analyst = "claude"
-implementer = "claude"
+implementer = "claude"        # "claude" | "copilot", optionally with a model: "copilot:claude-sonnet-5"
 reviewer = "claude"
-on_quota_exhausted = "ask"    # "ask" | "reassign" | "stop"
+on_quota_exhausted = "ask"    # when a worker runs out of quota: "ask" | "reassign" (to claude) | "stop"
 
 [git]                         # applies to agents; delivery is done by the app
 deny = ["push", "commit", "reset", "stash", "checkout", "rebase", "merge", "switch", "restore", "clean"]
@@ -326,7 +387,11 @@ force_push = false
 
 impl Policy {
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
-        toml::from_str(text).context("invalid policy.toml")
+        let policy: Self = toml::from_str(text).context("invalid policy.toml")?;
+        for (role, spec) in [("analyst", &policy.roles.analyst), ("implementer", &policy.roles.implementer), ("reviewer", &policy.roles.reviewer)] {
+            Worker::parse(spec).with_context(|| format!("invalid policy.toml: roles.{role}"))?;
+        }
+        Ok(policy)
     }
 
     /// Defaults overridden by the repo's `.ai-tasks/policy.toml`, if present.
@@ -564,6 +629,22 @@ mod tests {
         assert!(matches!(w(Role::Analyst, ".ai-tasks/notes/x.md"), Verdict::Deny(_)));
         assert!(matches!(w(Role::Analyst, ".ai-tasks/policy.toml"), Verdict::Deny(_)));
         assert!(matches!(eval(&p, Role::Analyst, "Edit", json!({})), Verdict::Deny(_)));
+    }
+
+    #[test]
+    fn worker_specs() {
+        assert_eq!(Worker::parse("claude").unwrap(), Worker { agent: Agent::Claude, model: None });
+        assert_eq!(
+            Worker::parse(" copilot:claude-sonnet-5 ").unwrap(),
+            Worker { agent: Agent::Copilot, model: Some("claude-sonnet-5".into()) }
+        );
+        assert_eq!(Worker::parse("copilot:").unwrap().model, None);
+        assert!(Worker::parse("codex").is_err());
+        let err = Policy::from_toml("[roles]\nimplementer = \"gpt\"\n").unwrap_err();
+        assert!(format!("{err:#}").contains("roles.implementer"));
+        let p = Policy::from_toml("[roles]\nimplementer = \"copilot\"\n").unwrap();
+        assert_eq!(p.roles.worker(Role::Implementer).agent, Agent::Copilot);
+        assert_eq!(p.roles.worker(Role::Reviewer).agent, Agent::Claude);
     }
 
     #[test]

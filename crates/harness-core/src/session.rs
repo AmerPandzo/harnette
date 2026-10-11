@@ -10,11 +10,12 @@ use anyhow::{Context, bail};
 use tokio::sync::Notify;
 
 use crate::build::{self, BuildOutcome};
-use crate::claude::{BuildSummary, Mode, RunConfig, RunHandle, start_run};
+use crate::agent::{RunHandle, start_run};
+use crate::claude::{BuildSummary, Mode, RunConfig};
 use crate::event::RunEvent;
 use crate::git;
 use crate::journal::{Journal, new_run_id};
-use crate::policy::{Budget, Policy};
+use crate::policy::{Agent, Budget, OnQuota, Policy, Worker};
 use crate::tasks::{self, StatusKind};
 use crate::watchdog::{Action, Alarm, PriorUsage, Watchdog};
 
@@ -31,6 +32,8 @@ struct SessionInner {
     /// Unwatched sink, for events the session itself emits (pause, resume, alarms).
     sink: Mutex<Option<Sink>>,
     watchdog: Mutex<Option<Watchdog>>,
+    /// Agents that ran out of quota in this session; their roles go to Claude for the rest of it.
+    exhausted: Mutex<Vec<Agent>>,
 }
 
 #[derive(Clone, Default)]
@@ -154,6 +157,62 @@ impl Session {
         self.inner.finished.load(Ordering::SeqCst)
     }
 
+    /// Fill in the worker for the run's role from `[roles]`. `claude_model` (picked in the UI)
+    /// applies to Claude roles that name no model.
+    fn assign_worker(&self, policy: &Policy, cfg: &mut RunConfig, claude_model: Option<String>) {
+        let mut worker = policy.roles.worker(cfg.mode.role());
+        if self.inner.exhausted.lock().unwrap().contains(&worker.agent) {
+            worker = Worker::claude();
+        }
+        cfg.model = worker.model.clone().or(if worker.agent == Agent::Claude { claude_model } else { None });
+        cfg.worker = worker;
+    }
+
+    /// Wait for a run; if its worker ran out of quota, apply `roles.on_quota_exhausted` and,
+    /// unless that says stop, run the same step again on Claude.
+    async fn wait_with_fallback(
+        &self,
+        mut handle: RunHandle,
+        mut cfg: RunConfig,
+        claude_model: Option<String>,
+        sink: &Sink,
+    ) -> anyhow::Result<bool> {
+        loop {
+            self.inner.current.lock().unwrap().replace(handle.clone());
+            let ok = handle.wait().await;
+            self.inner.current.lock().unwrap().take();
+            if ok || !handle.quota_exhausted() || self.cancelled() || cfg.worker.agent == Agent::Claude {
+                return Ok(ok);
+            }
+            let who = cfg.worker.label();
+            let role = cfg.mode.role().as_str();
+            self.inner.exhausted.lock().unwrap().push(cfg.worker.agent);
+            let on_quota = Policy::load(&cfg.repo).map(|p| p.roles.on_quota_exhausted).unwrap_or(OnQuota::Ask);
+            match on_quota {
+                OnQuota::Stop => {
+                    let message = format!("{who} is out of quota; stopping (roles.on_quota_exhausted = \"stop\").");
+                    sink(RunEvent::Alarm { alarm: "quota".into(), message: message.clone(), action: "stop".into() });
+                    bail!(message);
+                }
+                OnQuota::Ask => {
+                    let message = format!("{who} is out of quota. Resume continues the {role} step on Claude; Stop ends the run.");
+                    sink(RunEvent::Alarm { alarm: "quota".into(), message: message.clone(), action: "pause".into() });
+                    self.pause(&message);
+                    self.wait_if_paused().await;
+                    if self.cancelled() {
+                        return Ok(false);
+                    }
+                }
+                OnQuota::Reassign => {}
+            }
+            sink(RunEvent::Info { message: format!("{role} reassigned from {who} to Claude (out of quota).") });
+            cfg.worker = Worker::claude();
+            cfg.model = claude_model.clone();
+            let s2 = sink.clone();
+            handle = start_run(cfg.clone(), move |e| s2(e)).await?;
+        }
+    }
+
     fn current(&self) -> Option<RunHandle> {
         self.inner.current.lock().unwrap().clone()
     }
@@ -174,9 +233,11 @@ where
     F: Fn(RunEvent) + Send + Sync + 'static,
 {
     let session = Session::default();
-    let budget = Policy::load(&cfg.repo).map(|p| p.budget).unwrap_or_default();
-    let sink = session.watch(Arc::new(sink), budget, cfg.prior);
+    let policy = Policy::load(&cfg.repo)?;
+    let sink = session.watch(Arc::new(sink), policy.budget.clone(), cfg.prior);
     let mut cfg = cfg;
+    let claude_model = cfg.model.clone();
+    session.assign_worker(&policy, &mut cfg, claude_model.clone());
     if cfg.max_budget_usd.is_none() {
         cfg.max_budget_usd = session.remaining_usd();
     }
@@ -187,7 +248,7 @@ where
         Mode::Review { .. } => "Review",
     };
     let s2 = sink.clone();
-    let handle = match start_run(cfg, move |e| s2(e)).await {
+    let handle = match start_run(cfg.clone(), move |e| s2(e)).await {
         Ok(h) => h,
         Err(e) => {
             session.inner.finished.store(true, Ordering::SeqCst);
@@ -197,8 +258,11 @@ where
     session.inner.current.lock().unwrap().replace(handle.clone());
     let s = session.clone();
     tokio::spawn(async move {
-        let ok = handle.wait().await;
-        let summary = if ok { format!("{label} finished") } else { format!("{label} did not finish") };
+        let (ok, summary) = match s.wait_with_fallback(handle, cfg, claude_model, &sink).await {
+            Ok(true) => (true, format!("{label} finished")),
+            Ok(false) => (false, format!("{label} did not finish")),
+            Err(e) => (false, format!("{e:#}")),
+        };
         s.end(&sink, ok, summary);
     });
     Ok(session)
@@ -209,6 +273,7 @@ pub struct LoopConfig {
     pub slug: String,
     pub model: Option<String>,
     pub claude_bin: String,
+    pub copilot_bin: String,
     pub guard_bin: Option<PathBuf>,
     /// Usage of this task before the loop (from the ledger), for budgets.
     pub prior: PriorUsage,
@@ -221,15 +286,17 @@ impl LoopConfig {
             slug: slug.into(),
             model: None,
             claude_bin: "claude".into(),
+            copilot_bin: "copilot".into(),
             guard_bin: None,
             prior: PriorUsage::default(),
         }
     }
 
-    fn agent(&self, repo: &std::path::Path, mode: Mode, max_budget_usd: Option<f64>) -> RunConfig {
+    fn agent(&self, session: &Session, policy: &Policy, repo: &std::path::Path, mode: Mode, max_budget_usd: Option<f64>) -> RunConfig {
         let mut cfg = RunConfig::new(repo, &self.slug, mode);
-        cfg.model = self.model.clone();
+        session.assign_worker(policy, &mut cfg, self.model.clone());
         cfg.claude_bin = self.claude_bin.clone();
+        cfg.copilot_bin = self.copilot_bin.clone();
         cfg.guard_bin = self.guard_bin.clone();
         cfg.max_budget_usd = max_budget_usd;
         cfg
@@ -372,13 +439,10 @@ fn archive_reviews(repo: &std::path::Path, slug: &str, sink: &Sink) -> anyhow::R
     Ok(())
 }
 
-async fn run_agent(session: &Session, cfg: RunConfig, sink: &Sink) -> anyhow::Result<bool> {
+async fn run_agent(session: &Session, cfg: RunConfig, claude_model: Option<String>, sink: &Sink) -> anyhow::Result<bool> {
     let s2 = sink.clone();
-    let handle = start_run(cfg, move |e| s2(e)).await?;
-    session.inner.current.lock().unwrap().replace(handle.clone());
-    let ok = handle.wait().await;
-    session.inner.current.lock().unwrap().take();
-    Ok(ok)
+    let handle = start_run(cfg.clone(), move |e| s2(e)).await?;
+    session.wait_with_fallback(handle, cfg, claude_model, sink).await
 }
 
 async fn run_loop(
@@ -416,7 +480,7 @@ async fn run_loop(
 
                 let head_before = git::head(repo)?;
                 let mode = Mode::Implement { round, build_command: policy.build.command.clone() };
-                let ok = run_agent(session, cfg.agent(repo, mode, session.remaining_usd()), sink).await?;
+                let ok = run_agent(session, cfg.agent(session, policy, repo, mode, session.remaining_usd()), cfg.model.clone(), sink).await?;
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }
@@ -487,7 +551,7 @@ async fn run_loop(
                     None => None,
                 };
                 let mode = Mode::Review { round: review_round, diff_path, build, changed_since_last_review };
-                let ok = run_agent(session, cfg.agent(repo, mode, session.remaining_usd()), sink).await?;
+                let ok = run_agent(session, cfg.agent(session, policy, repo, mode, session.remaining_usd()), cfg.model.clone(), sink).await?;
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }

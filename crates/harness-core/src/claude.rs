@@ -16,7 +16,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
 use crate::event::{Parsed, RunEvent, parse_line, summarize_tool};
 use crate::journal::{Journal, new_run_id};
-use crate::policy::{Policy, Role, Verdict};
+use crate::policy::{Policy, Role, Verdict, Worker};
 use crate::prompt;
 use crate::watchdog::PriorUsage;
 use crate::tasks;
@@ -52,14 +52,18 @@ impl Mode {
     }
 }
 
+#[derive(Clone)]
 pub struct RunConfig {
     pub repo: PathBuf,
     pub slug: String,
     pub mode: Mode,
+    /// Which agent CLI runs this; `model` is passed to it as is.
+    pub worker: Worker,
     pub model: Option<String>,
     /// Overrides `shell.ask_timeout_min` from the policy.
     pub ask_timeout: Option<Duration>,
     pub claude_bin: String,
+    pub copilot_bin: String,
     /// Path to `harness-guard`; found next to the running executable when unset.
     pub guard_bin: Option<PathBuf>,
     /// Hard dollar cap the CLI enforces for this run (`--max-budget-usd`).
@@ -74,9 +78,11 @@ impl RunConfig {
             repo: repo.into(),
             slug: slug.into(),
             mode,
+            worker: Worker::claude(),
             model: None,
             ask_timeout: None,
             claude_bin: "claude".into(),
+            copilot_bin: "copilot".into(),
             guard_bin: None,
             max_budget_usd: None,
             prior: PriorUsage::default(),
@@ -99,13 +105,13 @@ struct Inner {
     emit: Emit,
 }
 
-/// Control surface for a running agent; cheap to clone.
+/// Control surface for a running Claude Code agent; cheap to clone.
 #[derive(Clone)]
-pub struct RunHandle {
+pub struct Handle {
     inner: Arc<Inner>,
 }
 
-impl RunHandle {
+impl Handle {
     pub fn run_id(&self) -> &str {
         &self.inner.run_id
     }
@@ -159,7 +165,7 @@ impl RunHandle {
 }
 
 #[cfg(unix)]
-fn signal(pid: Option<u32>, sig: &str) -> anyhow::Result<()> {
+pub(crate) fn signal(pid: Option<u32>, sig: &str) -> anyhow::Result<()> {
     let pid = pid.context("agent process id unknown")?;
     let ok = std::process::Command::new("kill").arg(format!("-{sig}")).arg(pid.to_string()).status()?.success();
     if !ok {
@@ -169,7 +175,7 @@ fn signal(pid: Option<u32>, sig: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn signal(_pid: Option<u32>, _sig: &str) -> anyhow::Result<()> {
+pub(crate) fn signal(_pid: Option<u32>, _sig: &str) -> anyhow::Result<()> {
     bail!("pausing an agent is not supported on this platform yet")
 }
 
@@ -191,7 +197,7 @@ async fn respond(inner: &Inner, request_id: &str, allow: bool, input: Value, mes
     let _ = write_line(inner, &msg).await;
 }
 
-fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
+pub(crate) fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
     if !cfg.repo.is_dir() {
         bail!("repo is not a directory: {}", cfg.repo.display());
     }
@@ -208,7 +214,7 @@ fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
 }
 
 /// Keep `.ai-tasks/` out of commits without touching the repo's tracked `.gitignore`.
-fn exclude_ai_tasks(repo: &std::path::Path) {
+pub(crate) fn exclude_ai_tasks(repo: &std::path::Path) {
     let exclude = repo.join(".git/info/exclude");
     if !repo.join(".git").is_dir() {
         return;
@@ -244,7 +250,19 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-pub async fn start_run<F>(cfg: RunConfig, sink: F) -> anyhow::Result<RunHandle>
+/// The first prompt for the run's mode.
+pub(crate) fn prompt_text(cfg: &RunConfig) -> String {
+    match &cfg.mode {
+        Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
+        Mode::Refine => prompt::refine(&cfg.slug),
+        Mode::Implement { round, build_command } => prompt::implement(&cfg.slug, *round, build_command.as_deref()),
+        Mode::Review { round, diff_path, build, changed_since_last_review } => {
+            prompt::review(&cfg.slug, *round, diff_path, build.as_ref(), changed_since_last_review.as_deref())
+        }
+    }
+}
+
+pub async fn start<F>(cfg: RunConfig, sink: F) -> anyhow::Result<Handle>
 where
     F: Fn(RunEvent) + Send + Sync + 'static,
 {
@@ -302,14 +320,7 @@ where
     });
 
     emit(RunEvent::Started { run_id: run_id.clone(), slug: cfg.slug.clone() });
-    let text = match &cfg.mode {
-        Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
-        Mode::Refine => prompt::refine(&cfg.slug),
-        Mode::Implement { round, build_command } => prompt::implement(&cfg.slug, *round, build_command.as_deref()),
-        Mode::Review { round, diff_path, build, changed_since_last_review } => {
-            prompt::review(&cfg.slug, *round, diff_path, build.as_ref(), changed_since_last_review.as_deref())
-        }
-    };
+    let text = prompt_text(&cfg);
     // The prompt goes to stdin, which the CLI does not echo; keep it for the audit trail.
     journal.lock().unwrap().raw(&json!({ "harness_prompt": text }).to_string());
     let first = json!({ "type": "user", "message": { "role": "user", "content": text } });
@@ -414,7 +425,7 @@ where
         });
     }
 
-    Ok(RunHandle { inner })
+    Ok(Handle { inner })
 }
 
 fn guard_settings(guard: &Path, repo: &Path, role: Role) -> String {
