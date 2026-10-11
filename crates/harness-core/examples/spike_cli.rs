@@ -1,6 +1,6 @@
 //! Terminal shell over harness-core, for testing the core without the GUI.
 //!
-//! cargo run -p harness-core --example spike_cli -- <repo> <slug> <ticket-file> [model]
+//! cargo run -p harness-core --example spike_cli -- <repo> <slug> <ticket-file | --refine> [model]
 //!
 //! While it runs, type on stdin:
 //!   y / n          answer the oldest open permission request
@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use harness_core::{RunConfig, RunEvent, start_analyze};
+use harness_core::{Mode, RunConfig, RunEvent, start_run};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -18,15 +18,19 @@ use tokio::sync::mpsc;
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [repo, slug, ticket_file, rest @ ..] = args.as_slice() else {
-        anyhow::bail!("usage: spike_cli <repo> <slug> <ticket-file> [model]");
+        anyhow::bail!("usage: spike_cli <repo> <slug> <ticket-file | --refine> [model]");
     };
-    let mut cfg = RunConfig::new(repo, slug, std::fs::read_to_string(ticket_file)?);
+    let mode = match ticket_file.as_str() {
+        "--refine" => Mode::Refine,
+        file => Mode::Analyze { ticket: std::fs::read_to_string(file)? },
+    };
+    let mut cfg = RunConfig::new(repo, slug, mode);
     cfg.model = rest.first().cloned();
 
     let open_asks = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<()>();
     let asks = open_asks.clone();
-    let handle = start_analyze(cfg, move |e| {
+    let handle = start_run(cfg, move |e| {
         match &e {
             RunEvent::PermissionAsk { request_id, tool, summary } => {
                 asks.lock().unwrap().push_back(request_id.clone());

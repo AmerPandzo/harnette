@@ -6,6 +6,8 @@ pub mod event;
 pub mod journal;
 pub mod policy;
 pub mod prompt;
+pub mod tasks;
+pub mod watch;
 
-pub use claude::{RunConfig, RunHandle, start_analyze};
+pub use claude::{Mode, RunConfig, RunHandle, start_run};
 pub use event::RunEvent;

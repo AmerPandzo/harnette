@@ -18,22 +18,32 @@ use crate::event::{Parsed, RunEvent, parse_line, summarize_tool};
 use crate::journal::{Journal, new_run_id};
 use crate::policy::{self, Verdict};
 use crate::prompt;
+use crate::tasks;
+
+/// What the run is for; picks the prompt.
+#[derive(Debug, Clone)]
+pub enum Mode {
+    /// First analysis of a ticket: writes the task doc.
+    Analyze { ticket: String },
+    /// Continue an analysis after the human answered Open questions in the doc.
+    Refine,
+}
 
 pub struct RunConfig {
     pub repo: PathBuf,
     pub slug: String,
-    pub ticket: String,
+    pub mode: Mode,
     pub model: Option<String>,
     pub ask_timeout: Duration,
     pub claude_bin: String,
 }
 
 impl RunConfig {
-    pub fn new(repo: impl Into<PathBuf>, slug: impl Into<String>, ticket: impl Into<String>) -> Self {
+    pub fn new(repo: impl Into<PathBuf>, slug: impl Into<String>, mode: Mode) -> Self {
         Self {
             repo: repo.into(),
             slug: slug.into(),
-            ticket: ticket.into(),
+            mode,
             model: None,
             ask_timeout: Duration::from_secs(10 * 60),
             claude_bin: "claude".into(),
@@ -111,16 +121,16 @@ fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
     if !cfg.repo.is_dir() {
         bail!("repo is not a directory: {}", cfg.repo.display());
     }
-    let slug_ok = !cfg.slug.is_empty()
-        && !cfg.slug.contains("..")
-        && cfg.slug.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
-    if !slug_ok {
+    if !tasks::valid_slug(&cfg.slug) {
         bail!("invalid slug {:?}: use letters, digits, '.', '_' or '-'", cfg.slug);
     }
-    if cfg.ticket.trim().is_empty() {
-        bail!("ticket text is empty");
+    match &cfg.mode {
+        Mode::Analyze { ticket } if ticket.trim().is_empty() => bail!("ticket text is empty"),
+        Mode::Refine if tasks::read(&cfg.repo, &cfg.slug).is_err() => {
+            bail!("no task doc .ai-tasks/{}.md to refine", cfg.slug)
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Keep `.ai-tasks/` out of commits without touching the repo's tracked `.gitignore`.
@@ -137,7 +147,7 @@ fn exclude_ai_tasks(repo: &std::path::Path) {
     }
 }
 
-pub async fn start_analyze<F>(cfg: RunConfig, sink: F) -> anyhow::Result<RunHandle>
+pub async fn start_run<F>(cfg: RunConfig, sink: F) -> anyhow::Result<RunHandle>
 where
     F: Fn(RunEvent) + Send + Sync + 'static,
 {
@@ -185,7 +195,11 @@ where
     });
 
     emit(RunEvent::Started { run_id: run_id.clone(), slug: cfg.slug.clone() });
-    let first = json!({ "type": "user", "message": { "role": "user", "content": prompt::analyze(&cfg.slug, &cfg.ticket) } });
+    let text = match &cfg.mode {
+        Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
+        Mode::Refine => prompt::refine(&cfg.slug),
+    };
+    let first = json!({ "type": "user", "message": { "role": "user", "content": text } });
     write_line(&inner, &first).await?;
 
     let stderr_tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
