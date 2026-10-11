@@ -7,6 +7,7 @@
     git: { deny: string[] };
     shell: { allow: string[]; single_command: boolean; unlisted: Access; ask_timeout_min: number };
     read: { outside_repo: Access };
+    edits: { scope: "task" | "repo"; on_out_of_scope: "warn" | "block" };
     web: { access: Access };
     budget: {
       tokens_per_task: number | null;
@@ -57,9 +58,9 @@
     load();
   });
 
-  /** Only the sections the form edits; everything else in the file stays as written. */
+  /** Only the keys the form edits; everything else in the file stays as written. */
   function values(p: Policy) {
-    const { edits: _e, delivery, ...rest } = p as Policy & { edits?: unknown };
+    const { delivery, ...rest } = p;
     const { force_push: _f, ...deliveryRest } = delivery as Policy["delivery"] & { force_push?: boolean };
     return { ...rest, delivery: deliveryRest };
   }
@@ -290,7 +291,7 @@
     </section>
 
     <section>
-      <h3>Git and reach</h3>
+      <h3>Git, reach and edits</h3>
       <p class="hint">Git commands agents may never run (Harness does delivery itself):</p>
       <div class="verbs">
         {#each gitVerbs as v (v)}
@@ -305,6 +306,17 @@
         <span class="name">Web</span>
         {@render seg(form.web.access, ["ask", "deny", "allow"] as Access[], (v) => (form!.web.access = v))}
       </div>
+      <div class="row">
+        <span class="name">Implementer edits</span>
+        {@render seg(form.edits.scope, ["task", "repo"], (v) => (form!.edits.scope = v), { task: "task files", repo: "whole repo" })}
+      </div>
+      {#if form.edits.scope === "task"}
+        <div class="row">
+          <span class="name">Other files</span>
+          {@render seg(form.edits.on_out_of_scope, ["warn", "block"], (v) => (form!.edits.on_out_of_scope = v))}
+        </div>
+        <p class="hint">Task files = paths the task doc names in backticks (e.g. <code>src/a.js</code>, <code>src/util/</code>). A doc naming none has no limit.</p>
+      {/if}
     </section>
 
     <section>

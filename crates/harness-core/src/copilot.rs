@@ -36,6 +36,7 @@ struct Inner {
     /// Assistant text of the current message, flushed as one Text event.
     text: Mutex<String>,
     last_text: Mutex<String>,
+    scope_warned: Mutex<std::collections::HashSet<String>>,
     kill: Mutex<Option<oneshot::Sender<()>>>,
     finished: AtomicBool,
     succeeded: AtomicBool,
@@ -181,12 +182,12 @@ pub fn map_tool(tool_call: &Value) -> Option<Vec<(String, Value)>> {
 }
 
 /// Combined verdict over every path a call touches: any deny wins, then any ask.
-pub fn verdict_for(policy: &Policy, role: Role, tool_call: &Value, repo: &Path) -> Verdict {
+pub fn verdict_for(policy: &Policy, role: Role, tool_call: &Value, repo: &Path, slug: &str) -> Verdict {
     let Some(calls) = map_tool(tool_call) else { return Verdict::Ask };
     let mut allow_rule = None;
     let mut ask = false;
     for (tool, input) in &calls {
-        match policy.evaluate(role, tool, input, repo) {
+        match policy.evaluate_task(role, tool, input, repo, slug) {
             Verdict::Deny(r) => return Verdict::Deny(r),
             Verdict::Ask => ask = true,
             Verdict::Allow(r) => {
@@ -274,15 +275,28 @@ fn on_update(inner: &Inner, update: &Value) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn on_permission(inner: Arc<Inner>, policy: &Policy, role: Role, repo: &Path, ask_timeout: Duration, id: Value, params: &Value) {
+async fn on_permission(
+    inner: Arc<Inner>,
+    policy: &Policy,
+    role: Role,
+    repo: &Path,
+    slug: &str,
+    ask_timeout: Duration,
+    id: Value,
+    params: &Value,
+) {
     flush_text(&inner);
     let tool_call = params.get("toolCall").cloned().unwrap_or(Value::Null);
     let options = params.get("options").cloned().unwrap_or(Value::Null);
     let request_id = tool_call.get("toolCallId").and_then(Value::as_str).map(String::from).unwrap_or_else(|| id.to_string());
     let (tool, summary) = describe(&tool_call);
-    match verdict_for(policy, role, &tool_call, repo) {
+    match verdict_for(policy, role, &tool_call, repo, slug) {
         Verdict::Allow(rule) => {
+            let alarm = crate::claude::scope_alarm(&rule, &mut inner.scope_warned.lock().unwrap());
             (inner.emit)(RunEvent::PermissionAuto { request_id, tool, summary, allowed: true, rule });
+            if let Some(alarm) = alarm {
+                (inner.emit)(alarm);
+            }
             reply(&inner, &id, option_for(&options, true)).await;
         }
         Verdict::Deny(rule) => {
@@ -383,6 +397,7 @@ where
         notes: Mutex::new(Vec::new()),
         text: Mutex::new(String::new()),
         last_text: Mutex::new(String::new()),
+        scope_warned: Mutex::new(std::collections::HashSet::new()),
         kill: Mutex::new(Some(kill_tx)),
         finished: AtomicBool::new(false),
         succeeded: AtomicBool::new(false),
@@ -408,6 +423,7 @@ where
         let journal = journal.clone();
         let policy = policy.clone();
         let repo = repo.clone();
+        let slug = cfg.slug.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -422,7 +438,7 @@ where
                     }
                     (Some("session/request_permission"), Some(id)) => {
                         let params = msg.get("params").cloned().unwrap_or(Value::Null);
-                        on_permission(inner.clone(), &policy, role, &repo, ask_timeout, id.clone(), &params).await;
+                        on_permission(inner.clone(), &policy, role, &repo, &slug, ask_timeout, id.clone(), &params).await;
                     }
                     (Some(other), Some(id)) => {
                         // We announce no fs/terminal capabilities; anything else is unsupported.
@@ -551,7 +567,7 @@ mod tests {
         let p = Policy::default();
         let r = repo();
         let inside = r.join("src/a.js").display().to_string();
-        let v = |tc: Value| verdict_for(&p, Role::Implementer, &tc, &r);
+        let v = |tc: Value| verdict_for(&p, Role::Implementer, &tc, &r, "T");
         assert!(matches!(v(json!({ "kind": "edit", "locations": [{ "path": inside }] })), Verdict::Allow(_)));
         assert!(matches!(v(json!({ "kind": "edit", "rawInput": { "path": "/etc/hosts" } })), Verdict::Deny(_)));
         assert!(matches!(v(json!({ "kind": "execute", "rawInput": { "command": "git push origin main" } })), Verdict::Deny(_)));
@@ -564,7 +580,7 @@ mod tests {
         assert!(matches!(v(mv), Verdict::Deny(_)));
         // Analyst may only write the task docs.
         assert!(matches!(
-            verdict_for(&p, Role::Analyst, &json!({ "kind": "edit", "locations": [{ "path": inside }] }), &r),
+            verdict_for(&p, Role::Analyst, &json!({ "kind": "edit", "locations": [{ "path": inside }] }), &r, "T"),
             Verdict::Deny(_)
         ));
     }

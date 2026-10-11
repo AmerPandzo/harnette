@@ -380,8 +380,8 @@ ask_timeout_min = 10          # unanswered asks are denied after this
 outside_repo = "ask"          # Read/Grep/Glob outside the repository: "ask" | "deny" | "allow"
 
 [edits]                       # implementer only (analyst and reviewer write only .ai-tasks/*.md)
-scope = "task"                # "task" | "repo"
-on_out_of_scope = "warn"      # "warn" | "block"
+scope = "task"                # "task": only files the task doc names (in backticks) | "repo": anywhere
+on_out_of_scope = "warn"      # "warn" (allowed, raises an alarm) | "block" (denied with a reason)
 
 [web]
 access = "ask"                # WebFetch / WebSearch: "ask" | "deny" | "allow"
@@ -581,6 +581,34 @@ impl Policy {
         }
     }
 
+    /// `evaluate`, plus `[edits]` task scope for the implementer: writes to files the task doc does
+    /// not name warn or block. The task's own doc is always in scope.
+    pub fn evaluate_task(&self, role: Role, tool: &str, input: &Value, repo: &Path, slug: &str) -> Verdict {
+        let verdict = self.evaluate(role, tool, input, repo);
+        let path = input.get("file_path").or_else(|| input.get("notebook_path")).and_then(Value::as_str);
+        let is_write = matches!(tool, "Write" | "Edit" | "MultiEdit" | "NotebookEdit");
+        let (Verdict::Allow(_), true, Role::Implementer, EditScope::Task, Some(path)) = (&verdict, is_write, role, self.edits.scope, path)
+        else {
+            return verdict;
+        };
+        let full = resolve(repo, path);
+        let rel = full.strip_prefix(repo).unwrap_or(&full).to_string_lossy().replace('\\', "/");
+        if rel == format!(".ai-tasks/{slug}.md") {
+            return verdict;
+        }
+        let scope = crate::tasks::read(repo, slug).map(|d| task_scope(&d)).unwrap_or_default();
+        if scope.is_empty() || in_scope(&scope, &rel) {
+            return verdict;
+        }
+        match self.edits.on_out_of_scope {
+            OnOutOfScope::Warn => Verdict::Allow(format!("{OUT_OF_SCOPE}: {rel} (edits.on_out_of_scope = warn)")),
+            OnOutOfScope::Block => Verdict::Deny(format!(
+                "{rel} is not among the files the task doc names. Do not change it; if the fix really needs it, \
+                 explain why under Implementation notes and finish, so the human can widen the scope."
+            )),
+        }
+    }
+
     fn bash(&self, command: &str, repo: &Path) -> Verdict {
         let words: Vec<&str> =
             command.split(|c: char| c.is_whitespace() || ";|&()`".contains(c)).filter(|w| !w.is_empty()).collect();
@@ -633,6 +661,54 @@ fn access(a: Access, what: &str) -> Verdict {
         Access::Ask => Verdict::Ask,
         Access::Deny => Verdict::Deny(format!("Policy does not allow {what}.")),
     }
+}
+
+/// Files and folders a task doc names: backticked paths anywhere (`src/a.js`, `src/util/`,
+/// `src/a.js:12` evidence) and `(path:line)` references in review findings. Empty = no scope known.
+pub fn task_scope(doc: &str) -> Vec<String> {
+    let is_path_char = |c: char| c.is_ascii_alphanumeric() || "._/-".contains(c);
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |token: &str| {
+        let token = token.trim().trim_start_matches("./");
+        // `src/a.js:12-14` → `src/a.js`
+        let token = match token.split_once(':') {
+            Some((path, line)) if line.chars().all(|c| c.is_ascii_digit() || c == '-') => path,
+            _ => token,
+        };
+        let looks_like_path = !token.is_empty()
+            && token.chars().all(is_path_char)
+            && (token.contains('/') || token.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && (1..=5).contains(&ext.len())))
+            && (!token.starts_with('.') || token.starts_with(".ai-tasks/"));
+        if looks_like_path && !out.iter().any(|t| t == token) {
+            out.push(token.to_string());
+        }
+    };
+    for (i, part) in doc.split('`').enumerate() {
+        if i % 2 == 1 {
+            add(part);
+        }
+    }
+    for chunk in doc.split('(').skip(1) {
+        if let Some((inner, _)) = chunk.split_once(')')
+            && inner.contains(':')
+        {
+            add(inner);
+        }
+    }
+    out
+}
+
+/// Is `rel` (repo-relative, `/`-separated) covered by the scope? A bare file name matches anywhere.
+pub fn in_scope(scope: &[String], rel: &str) -> bool {
+    scope.iter().any(|s| {
+        if let Some(dir) = s.strip_suffix('/') {
+            rel.starts_with(&format!("{dir}/"))
+        } else if s.contains('/') {
+            rel == s || rel.starts_with(&format!("{s}/"))
+        } else {
+            rel.rsplit('/').next() == Some(s.as_str())
+        }
+    })
 }
 
 fn write_verdict(role: Role, path: &Path, repo: &Path) -> Verdict {
@@ -712,9 +788,12 @@ fn is_inside(path: &Path, dir: &Path) -> bool {
     path.starts_with(dir) && path != dir
 }
 
+/// Prefix of the rule text for an allowed write outside the task scope (adapters raise an alarm on it).
+pub const OUT_OF_SCOPE: &str = "outside the task scope";
+
 /// PreToolUse hook answer for `harness-guard`. Never fails open: any error asks the human.
-pub fn hook_response(repo: &Path, role: Role, hook_input: &str) -> String {
-    let (decision, reason) = match decide_hook(repo, role, hook_input) {
+pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, hook_input: &str) -> String {
+    let (decision, reason) = match decide_hook(repo, role, slug, hook_input) {
         Ok(Verdict::Allow(rule)) => ("allow", rule),
         Ok(Verdict::Deny(reason)) => ("deny", reason),
         Ok(Verdict::Ask) => ("ask", "Harness asks the human supervisor.".to_string()),
@@ -730,11 +809,15 @@ pub fn hook_response(repo: &Path, role: Role, hook_input: &str) -> String {
     .to_string()
 }
 
-fn decide_hook(repo: &Path, role: Role, hook_input: &str) -> anyhow::Result<Verdict> {
+fn decide_hook(repo: &Path, role: Role, slug: Option<&str>, hook_input: &str) -> anyhow::Result<Verdict> {
     let v: Value = serde_json::from_str(hook_input).context("hook input is not JSON")?;
     let tool = v.get("tool_name").and_then(Value::as_str).context("hook input has no tool_name")?;
     let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
-    Ok(Policy::load(repo)?.evaluate(role, tool, &input, repo))
+    let policy = Policy::load(repo)?;
+    Ok(match slug {
+        Some(slug) => policy.evaluate_task(role, tool, &input, repo, slug),
+        None => policy.evaluate(role, tool, &input, repo),
+    })
 }
 
 #[cfg(test)]
@@ -826,6 +909,40 @@ mod tests {
     }
 
     #[test]
+    fn task_scope_from_the_doc() {
+        let doc = "## Analysis\n`src/math.js:2-4` has no checks; `npm test` runs `node --test`.\n\n## Proposed fix\n1. Create `src/clamp.js` and `clamp.test.js`.\n2. Touch `src/util/`.\n\n## Review log\n- [ ] R1-1 [Minor] nit (src/extra.js:9) - expected: x\n";
+        let scope = task_scope(doc);
+        assert_eq!(scope, vec!["src/math.js", "src/clamp.js", "clamp.test.js", "src/util/", "src/extra.js"]);
+        assert!(in_scope(&scope, "src/clamp.js"));
+        assert!(in_scope(&scope, "test/clamp.test.js"), "a bare name matches in any folder");
+        assert!(in_scope(&scope, "src/util/deep/x.js"));
+        assert!(!in_scope(&scope, "src/other.js"));
+        assert!(!in_scope(&scope, "package.json"));
+    }
+
+    #[test]
+    fn edits_outside_the_task_scope_warn_or_block() {
+        let dir = std::env::temp_dir().join(format!("harness-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".ai-tasks")).unwrap();
+        std::fs::write(dir.join(".ai-tasks/T.md"), "# T\n\n## Proposed fix\n1. Edit `src/a.js`.\n").unwrap();
+        let edit = |p: &str| json!({ "file_path": dir.join(p).display().to_string() });
+        let warn = Policy::default();
+        assert!(matches!(warn.evaluate_task(Role::Implementer, "Edit", &edit("src/a.js"), &dir, "T"), Verdict::Allow(r) if !r.starts_with(OUT_OF_SCOPE)));
+        assert!(matches!(warn.evaluate_task(Role::Implementer, "Edit", &edit("src/b.js"), &dir, "T"), Verdict::Allow(r) if r.starts_with(OUT_OF_SCOPE)));
+        assert!(matches!(warn.evaluate_task(Role::Implementer, "Edit", &edit(".ai-tasks/T.md"), &dir, "T"), Verdict::Allow(r) if !r.starts_with(OUT_OF_SCOPE)));
+        let block = Policy::from_toml("[edits]\non_out_of_scope = \"block\"\n").unwrap();
+        assert!(matches!(block.evaluate_task(Role::Implementer, "Write", &edit("src/b.js"), &dir, "T"), Verdict::Deny(r) if r.contains("src/b.js")));
+        let repo_scope = Policy::from_toml("[edits]\nscope = \"repo\"\non_out_of_scope = \"block\"\n").unwrap();
+        assert!(matches!(repo_scope.evaluate_task(Role::Implementer, "Edit", &edit("src/b.js"), &dir, "T"), Verdict::Allow(_)));
+        // Other roles and reads are unaffected; a doc naming no files has no scope.
+        assert!(matches!(block.evaluate_task(Role::Implementer, "Read", &edit("src/b.js"), &dir, "T"), Verdict::Allow(_)));
+        std::fs::write(dir.join(".ai-tasks/T.md"), "# T\n\nFix the bug.\n").unwrap();
+        assert!(matches!(block.evaluate_task(Role::Implementer, "Edit", &edit("src/b.js"), &dir, "T"), Verdict::Allow(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn worker_specs() {
         assert_eq!(Worker::parse("claude").unwrap(), Worker { agent: Agent::Claude, model: None });
         assert_eq!(
@@ -898,7 +1015,7 @@ mod tests {
     #[test]
     fn hook_response_shapes() {
         let decision = |input: &str| -> String {
-            let out: Value = serde_json::from_str(&hook_response(Path::new("/nonexistent/repo"), Role::Analyst, input)).unwrap();
+            let out: Value = serde_json::from_str(&hook_response(Path::new("/nonexistent/repo"), Role::Analyst, None, input)).unwrap();
             out["hookSpecificOutput"]["permissionDecision"].as_str().unwrap().to_string()
         };
         assert_eq!(decision(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#), "allow");

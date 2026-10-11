@@ -298,7 +298,7 @@ where
         // User-level hooks and permission rules could decide prompts before we see them.
         .args(["--setting-sources", "project,local"])
         // harness-guard sees every tool call; anything it cannot allow or deny comes back to us as a prompt.
-        .args(["--settings", &guard_settings(&guard, &repo, role)]);
+        .args(["--settings", &guard_settings(&guard, &repo, role, &cfg.slug)]);
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
     }
@@ -356,10 +356,12 @@ where
         let inner = inner.clone();
         let repo = repo.clone();
         let policy = policy.clone();
+        let slug = cfg.slug.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             // The CLI repeats a message's usage once per content block; report it once.
             let mut usage_seen = std::collections::HashSet::new();
+            let mut scope_warned = std::collections::HashSet::new();
             while let Ok(Some(line)) = lines.next_line().await {
                 journal.lock().unwrap().raw(&line);
                 match parse_line(&line) {
@@ -377,7 +379,7 @@ where
                             // harness-guard decides allow/deny silently; mirror its verdict into the journal.
                             let guard_verdict = match &e {
                                 RunEvent::ToolUse { id, tool, summary, input } => {
-                                    match policy.evaluate(role, tool, input, &repo) {
+                                    match policy.evaluate_task(role, tool, input, &repo, &slug) {
                                         Verdict::Allow(rule) => Some((id.clone(), tool.clone(), summary.clone(), true, rule)),
                                         Verdict::Deny(rule) => Some((id.clone(), tool.clone(), summary.clone(), false, rule)),
                                         Verdict::Ask => None,
@@ -387,7 +389,11 @@ where
                             };
                             (inner.emit)(e);
                             if let Some((request_id, tool, summary, allowed, rule)) = guard_verdict {
+                                let scope_alarm = scope_alarm(&rule, &mut scope_warned);
                                 (inner.emit)(RunEvent::PermissionAuto { request_id, tool, summary, allowed, rule });
+                                if let Some(alarm) = scope_alarm {
+                                    (inner.emit)(alarm);
+                                }
                             }
                             if finished {
                                 // Closing stdin lets the CLI exit cleanly after its result.
@@ -396,7 +402,7 @@ where
                         }
                     }
                     Parsed::PermissionRequest { request_id, tool, input } => {
-                        handle_permission(&inner, &policy, role, &repo, ask_timeout, request_id, tool, input).await;
+                        handle_permission(&inner, &policy, role, &repo, &slug, ask_timeout, request_id, tool, input).await;
                     }
                     Parsed::Ignored => {}
                 }
@@ -436,12 +442,24 @@ where
     Ok(Handle { inner })
 }
 
-fn guard_settings(guard: &Path, repo: &Path, role: Role) -> String {
+/// An allowed write outside the task scope raises a warning alarm, once per file per run.
+pub(crate) fn scope_alarm(rule: &str, warned: &mut std::collections::HashSet<String>) -> Option<RunEvent> {
+    let rest = rule.strip_prefix(crate::policy::OUT_OF_SCOPE)?;
+    let file = rest.trim_start_matches(": ").split(" (").next().unwrap_or_default().to_string();
+    warned.insert(file.clone()).then(|| RunEvent::Alarm {
+        alarm: "scope".into(),
+        message: format!("The implementer changed {file}, which the task doc does not name."),
+        action: "warn".into(),
+    })
+}
+
+fn guard_settings(guard: &Path, repo: &Path, role: Role, slug: &str) -> String {
     let command = format!(
-        "{} --repo {} --role {}",
+        "{} --repo {} --role {} --slug {}",
         sh_quote(&guard.display().to_string()),
         sh_quote(&repo.display().to_string()),
-        role.as_str()
+        role.as_str(),
+        sh_quote(slug)
     );
     json!({ "hooks": { "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }] } }).to_string()
 }
@@ -452,13 +470,14 @@ async fn handle_permission(
     policy: &Policy,
     role: Role,
     repo: &std::path::Path,
+    slug: &str,
     ask_timeout: Duration,
     request_id: String,
     tool: String,
     input: Value,
 ) {
     let summary = summarize_tool(&tool, &input);
-    match policy.evaluate(role, &tool, &input, repo) {
+    match policy.evaluate_task(role, &tool, &input, repo, slug) {
         Verdict::Allow(rule) => {
             (inner.emit)(RunEvent::PermissionAuto { request_id: request_id.clone(), tool, summary, allowed: true, rule });
             respond(inner, &request_id, true, input, "").await;
@@ -498,11 +517,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scope_alarm_once_per_file() {
+        let mut warned = std::collections::HashSet::new();
+        let rule = format!("{}: src/b.js (edits.on_out_of_scope = warn)", crate::policy::OUT_OF_SCOPE);
+        assert!(matches!(scope_alarm(&rule, &mut warned), Some(RunEvent::Alarm { message, .. }) if message.contains("src/b.js")));
+        assert!(scope_alarm(&rule, &mut warned).is_none(), "second edit of the same file: no new alarm");
+        assert!(scope_alarm("write inside the repository", &mut warned).is_none());
+    }
+
+    #[test]
     fn hook_command_quotes_paths() {
         assert_eq!(sh_quote("/a b/it's"), r#"'/a b/it'\''s'"#);
-        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/harness-guard"), Path::new("/my repo"), Role::Analyst)).unwrap();
+        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/harness-guard"), Path::new("/my repo"), Role::Analyst, "T-1")).unwrap();
         let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(cmd, "'/x/harness-guard' --repo '/my repo' --role analyst");
+        assert_eq!(cmd, "'/x/harness-guard' --repo '/my repo' --role analyst --slug 'T-1'");
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "*");
     }
 }
