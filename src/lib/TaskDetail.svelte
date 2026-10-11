@@ -1,9 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { ask } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import DOMPurify from "dompurify";
   import { marked } from "marked";
-  import { STATUS_LABELS, type StatusKind, type TaskSummary } from "./types";
+  import { STATUS_LABELS, type Checkpoint, type StatusKind, type TaskSummary } from "./types";
 
   let {
     repo,
@@ -11,6 +12,7 @@
     version,
     busy,
     onrefine,
+    onrun,
     onclose,
   }: {
     repo: string;
@@ -19,8 +21,35 @@
     version: number;
     busy: boolean;
     onrefine: () => void;
+    onrun: () => void;
     onclose: () => void;
   } = $props();
+
+  let checkpoints = $state<Checkpoint[]>([]);
+  const runnable = $derived(["ready", "changes_requested", "in_review"].includes(task.status_kind));
+
+  $effect(() => {
+    const slug = task.slug;
+    void version;
+    void busy;
+    invoke<Checkpoint[]>("list_checkpoints", { repo, slug })
+      .then((c) => (checkpoints = c))
+      .catch(() => (checkpoints = []));
+  });
+
+  async function restore(c: Checkpoint) {
+    const yes = await ask(
+      `Put the working tree back to checkpoint ${c.round}? Changes made after it are overwritten and files added after it are deleted.`,
+      { title: "Restore checkpoint", kind: "warning", okLabel: "Restore", cancelLabel: "Cancel" },
+    );
+    if (!yes) return;
+    try {
+      await invoke("restore_checkpoint", { repo, slug: task.slug, round: c.round });
+      error = "";
+    } catch (e) {
+      error = String(e);
+    }
+  }
 
   let markdown = $state("");
   let draft = $state("");
@@ -108,6 +137,12 @@
           disabled={busy || task.status_kind !== "analysis"}
           title="Continue the analysis after answering Open questions in the doc">Refine</button
         >
+        <button
+          class:primary={runnable}
+          onclick={onrun}
+          disabled={busy || !runnable}
+          title="Implement → build → review until Done">Run</button
+        >
         <button onclick={edit}>Edit</button>
         <button onclick={onclose} title="Close">✕</button>
       {/if}
@@ -115,6 +150,17 @@
   </div>
   {#if error}<p class="error pad">{error}</p>{/if}
   {#if changedOnDisk}<p class="warn">The doc changed on disk while you were editing. Saving overwrites that change.</p>{/if}
+  {#if checkpoints.length > 0 && !editing}
+    <div class="cps">
+      <span class="meta">Checkpoints</span>
+      {#each checkpoints as c (c.round)}
+        <span class="cp" title={`${c.git_ref} · ${new Date(c.created_unix * 1000).toLocaleString()}`}>
+          {c.round}
+          <button class="link" onclick={() => restore(c)} disabled={busy}>Restore</button>
+        </span>
+      {/each}
+    </div>
+  {/if}
   {#if editing}
     <textarea bind:value={draft} spellcheck="false"></textarea>
   {:else}
@@ -156,6 +202,31 @@
   .actions {
     display: flex;
     gap: 6px;
+  }
+  .cps {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+  }
+  .meta {
+    color: var(--quiet);
+  }
+  .cp {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  .link {
+    border: none;
+    background: none;
+    padding: 0 2px;
+    color: var(--accent);
+    font-size: 12px;
   }
   .pad {
     padding: 8px 14px;

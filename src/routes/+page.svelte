@@ -7,7 +7,7 @@
   import PolicyView from "$lib/PolicyView.svelte";
   import RunView from "$lib/RunView.svelte";
   import TaskDetail from "$lib/TaskDetail.svelte";
-  import { answer, initRunEvents, onRunExit, run, startRun } from "$lib/run.svelte";
+  import { answer, initRunEvents, onRunExit, run, startLoop, startRun } from "$lib/run.svelte";
   import { remember, remembered, type TaskSummary } from "$lib/types";
 
   let repoInput = $state(remembered("harness.repo", ""));
@@ -62,6 +62,14 @@
     } catch {
       tab = "run"; // the error shows in the Run view
     }
+  }
+
+  async function runTask() {
+    if (!selectedTask) return;
+    try {
+      await startLoop({ repo, slug: selectedTask.slug, model: remembered("harness.model", "") });
+    } catch {}
+    tab = "run";
   }
 
   onMount(() => {
@@ -159,7 +167,7 @@
             <Board {tasks} {selected} onselect={(s) => (selected = selected === s ? null : s)} />
           </div>
           {#if selectedTask}
-            <TaskDetail {repo} task={selectedTask} {version} busy={run.running} onrefine={refine} onclose={() => (selected = null)} />
+            <TaskDetail {repo} task={selectedTask} {version} busy={run.running} onrefine={refine} onrun={runTask} onclose={() => (selected = null)} />
           {/if}
         </div>
       {/if}

@@ -54,7 +54,14 @@ export type RunEvent =
   | { kind: "quota"; five_hour: number; seven_day: number }
   | Finished
   | { kind: "error"; message: string }
-  | { kind: "exited"; code: number | null };
+  | { kind: "exited"; code: number | null }
+  | { kind: "phase"; round: number; role: string }
+  | { kind: "checkpoint"; round: number; git_ref: string }
+  | { kind: "build"; ok: boolean; command: string; duration_ms: number; tail: string; log: string }
+  | { kind: "status_changed"; to: string; by: string; reason: string | null }
+  | { kind: "session_ended"; ok: boolean; summary: string };
+
+export type Checkpoint = { round: number; git_ref: string; commit: string; created_unix: number };
 
 export type Ask = { request_id: string; tool: string; summary: string };
 

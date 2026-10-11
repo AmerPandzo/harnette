@@ -7,13 +7,14 @@ use std::sync::Mutex;
 use harness_core::policy::{Policy, default_toml, policy_path};
 use harness_core::tasks::{self, StatusKind, TaskSummary};
 use harness_core::watch::{TaskWatcher, watch_tasks};
-use harness_core::{Mode, RunConfig, RunEvent, RunHandle, start_run as start_core_run};
+use harness_core::git::{self, Checkpoint};
+use harness_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Default)]
 struct AppState {
-    run: Mutex<Option<RunHandle>>,
+    run: Mutex<Option<Session>>,
     watcher: Mutex<Option<TaskWatcher>>,
 }
 
@@ -24,9 +25,9 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 fn on_event(app: &AppHandle, event: RunEvent) {
     match &event {
         RunEvent::PermissionAsk { tool, summary, .. } => notify(app, &format!("Harness: allow {tool}?"), summary),
-        RunEvent::Finished { ok, cost_usd, .. } => {
-            let title = if *ok { "Harness: run finished" } else { "Harness: run failed" };
-            notify(app, title, &format!("Cost ${cost_usd:.4}"));
+        RunEvent::Build { ok: false, command, .. } => notify(app, "Harness: build is red", command),
+        RunEvent::SessionEnded { ok, summary } => {
+            notify(app, if *ok { "Harness: finished" } else { "Harness: stopped" }, summary);
         }
         _ => {}
     }
@@ -54,8 +55,8 @@ async fn start_run(
     mode: String,
     ticket: Option<String>,
     model: Option<String>,
-) -> Result<String, String> {
-    if state.run.lock().unwrap().as_ref().is_some_and(|h| !h.is_finished()) {
+) -> Result<(), String> {
+    if busy(&state) {
         return Err("A run is already in progress.".into());
     }
     let mode = match mode.as_str() {
@@ -66,10 +67,53 @@ async fn start_run(
     let mut cfg = RunConfig::new(expand_home(repo.trim()), slug.trim(), mode);
     cfg.model = model.filter(|m| !m.trim().is_empty());
     let sink_app = app.clone();
-    let handle = start_core_run(cfg, move |e| on_event(&sink_app, e)).await.map_err(err)?;
-    let run_id = handle.run_id().to_string();
-    state.run.lock().unwrap().replace(handle);
-    Ok(run_id)
+    let session = start_single(cfg, move |e| on_event(&sink_app, e)).await.map_err(err)?;
+    state.run.lock().unwrap().replace(session);
+    Ok(())
+}
+
+fn busy(state: &AppState) -> bool {
+    state.run.lock().unwrap().as_ref().is_some_and(|s| !s.is_finished())
+}
+
+/// Implement → build → review until Done (or a stop condition).
+#[tauri::command]
+async fn start_loop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    repo: String,
+    slug: String,
+    model: Option<String>,
+) -> Result<(), String> {
+    if busy(&state) {
+        return Err("A run is already in progress.".into());
+    }
+    let mut cfg = LoopConfig::new(expand_home(repo.trim()), slug.trim());
+    cfg.model = model.filter(|m| !m.trim().is_empty());
+    let sink_app = app.clone();
+    let session = start_core_loop(cfg, move |e| on_event(&sink_app, e)).await.map_err(err)?;
+    state.run.lock().unwrap().replace(session);
+    Ok(())
+}
+
+#[tauri::command]
+fn list_checkpoints(repo: String, slug: String) -> Result<Vec<Checkpoint>, String> {
+    let repo = expand_home(&repo);
+    if !git::is_repo(&repo) {
+        return Ok(Vec::new());
+    }
+    git::list_checkpoints(&repo, &slug).map_err(err)
+}
+
+#[tauri::command]
+fn restore_checkpoint(state: State<'_, AppState>, repo: String, slug: String, round: u32) -> Result<(), String> {
+    if busy(&state) {
+        return Err("Stop the running session before restoring a checkpoint.".into());
+    }
+    if !tasks::valid_slug(&slug) {
+        return Err("invalid slug".into());
+    }
+    git::restore(&expand_home(&repo), &git::checkpoint_ref(&slug, round)).map_err(err)
 }
 
 #[tauri::command]
@@ -156,6 +200,9 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             start_run,
+            start_loop,
+            list_checkpoints,
+            restore_checkpoint,
             answer_permission,
             send_note,
             stop_run,

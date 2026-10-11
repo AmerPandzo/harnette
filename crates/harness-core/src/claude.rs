@@ -12,7 +12,7 @@ use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
 use crate::event::{Parsed, RunEvent, parse_line, summarize_tool};
 use crate::journal::{Journal, new_run_id};
@@ -27,12 +27,26 @@ pub enum Mode {
     Analyze { ticket: String },
     /// Continue an analysis after the human answered Open questions in the doc.
     Refine,
+    /// Implement the Proposed fix or the open review findings.
+    Implement { round: u32, build_command: Option<String> },
+    /// Fresh-session review of the change against the task doc.
+    Review { round: u32, diff_path: String, build: Option<BuildSummary> },
+}
+
+/// What the reviewer is told about Harness's own build.
+#[derive(Debug, Clone)]
+pub struct BuildSummary {
+    pub ok: bool,
+    pub command: String,
+    pub tail: String,
 }
 
 impl Mode {
     pub fn role(&self) -> Role {
         match self {
             Mode::Analyze { .. } | Mode::Refine => Role::Analyst,
+            Mode::Implement { .. } => Role::Implementer,
+            Mode::Review { .. } => Role::Reviewer,
         }
     }
 }
@@ -71,6 +85,9 @@ struct Inner {
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     kill: Mutex<Option<oneshot::Sender<()>>>,
     finished: AtomicBool,
+    /// The agent reported a successful result.
+    succeeded: AtomicBool,
+    exited: Notify,
     emit: Emit,
 }
 
@@ -102,6 +119,19 @@ impl RunHandle {
     /// True once the agent process has exited.
     pub fn is_finished(&self) -> bool {
         self.inner.finished.load(Ordering::SeqCst)
+    }
+
+    /// Wait until the agent process has exited; true if it finished its task successfully.
+    pub async fn wait(&self) -> bool {
+        loop {
+            let notified = self.inner.exited.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_finished() {
+                return self.inner.succeeded.load(Ordering::SeqCst);
+            }
+            notified.await;
+        }
     }
 
     pub fn stop(&self) {
@@ -138,8 +168,8 @@ fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
     }
     match &cfg.mode {
         Mode::Analyze { ticket } if ticket.trim().is_empty() => bail!("ticket text is empty"),
-        Mode::Refine if tasks::read(&cfg.repo, &cfg.slug).is_err() => {
-            bail!("no task doc .ai-tasks/{}.md to refine", cfg.slug)
+        Mode::Refine | Mode::Implement { .. } | Mode::Review { .. } if tasks::read(&cfg.repo, &cfg.slug).is_err() => {
+            bail!("no task doc .ai-tasks/{}.md", cfg.slug)
         }
         _ => Ok(()),
     }
@@ -230,6 +260,8 @@ where
         pending: Mutex::new(HashMap::new()),
         kill: Mutex::new(Some(kill_tx)),
         finished: AtomicBool::new(false),
+        succeeded: AtomicBool::new(false),
+        exited: Notify::new(),
         emit: emit.clone(),
     });
 
@@ -237,6 +269,8 @@ where
     let text = match &cfg.mode {
         Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
         Mode::Refine => prompt::refine(&cfg.slug),
+        Mode::Implement { round, build_command } => prompt::implement(&cfg.slug, *round, build_command.as_deref()),
+        Mode::Review { round, diff_path, build } => prompt::review(&cfg.slug, *round, diff_path, build.as_ref()),
     };
     let first = json!({ "type": "user", "message": { "role": "user", "content": text } });
     write_line(&inner, &first).await?;
@@ -271,6 +305,9 @@ where
                     Parsed::Events(events) => {
                         for e in events {
                             let finished = matches!(e, RunEvent::Finished { .. });
+                            if let RunEvent::Finished { ok: true, .. } = e {
+                                inner.succeeded.store(true, Ordering::SeqCst);
+                            }
                             // harness-guard decides allow/deny silently; mirror its verdict into the journal.
                             let guard_verdict = match &e {
                                 RunEvent::ToolUse { id, tool, summary, input } => {
@@ -321,8 +358,12 @@ where
                     emit(RunEvent::Error { message: tail.join("\n") });
                 }
             }
+            if code != Some(0) {
+                inner.succeeded.store(false, Ordering::SeqCst);
+            }
             inner.finished.store(true, Ordering::SeqCst);
             emit(RunEvent::Exited { code });
+            inner.exited.notify_waiters();
         });
     }
 

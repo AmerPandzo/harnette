@@ -36,6 +36,12 @@ pub enum RunEvent {
     },
     Error { message: String },
     Exited { code: Option<i32> },
+    // Session / loop level
+    Phase { round: u32, role: String },
+    Checkpoint { round: u32, git_ref: String },
+    Build { ok: bool, command: String, duration_ms: u64, tail: String, log: String },
+    StatusChanged { to: String, by: String, reason: Option<String> },
+    SessionEnded { ok: bool, summary: String },
 }
 
 /// One line of agent output, classified.

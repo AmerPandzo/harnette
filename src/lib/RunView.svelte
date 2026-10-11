@@ -98,13 +98,28 @@
         {:else if e.kind === "note"}
           <div class="ev note">You: {e.text}</div>
         {:else if e.kind === "started"}
-          <div class="ev sys">{run.mode === "refine" ? "Refine" : "Analyze"} run {e.run_id} started for {e.slug}</div>
+          <div class="ev sys">Agent run {e.run_id} started for {e.slug}</div>
         {:else if e.kind === "finished"}
           <div class="ev sys">{e.ok ? "Finished" : "Failed"} · ${e.cost_usd.toFixed(4)}</div>
         {:else if e.kind === "error"}
           <div class="ev error">{e.message}</div>
         {:else if e.kind === "exited"}
           <div class="ev sys">Agent exited ({e.code ?? "killed"})</div>
+        {:else if e.kind === "phase"}
+          <div class="phase">Round {e.round} · {e.role === "implementer" ? "Implementer" : "Reviewer"}</div>
+        {:else if e.kind === "checkpoint"}
+          <div class="ev sys">Checkpoint {e.round} saved <code>{e.git_ref}</code></div>
+        {:else if e.kind === "build"}
+          <details class="ev build" class:err={!e.ok}>
+            <summary>
+              Build <code>{e.command}</code> <b class:no={!e.ok}>{e.ok ? "green" : "red"}</b> · {(e.duration_ms / 1000).toFixed(1)}s
+            </summary>
+            <pre>{e.tail}</pre>
+          </details>
+        {:else if e.kind === "status_changed"}
+          <div class="ev sys">Status → <b>{e.to}</b> by {e.by}{e.reason ? `: ${e.reason}` : ""}</div>
+        {:else if e.kind === "session_ended"}
+          <div class="ended" class:err={!e.ok}>{e.ok ? "✓" : "■"} {e.summary}</div>
         {/if}
       {/each}
     </section>
@@ -214,6 +229,37 @@
   }
   .tool.err {
     border-color: var(--bad);
+  }
+  .phase {
+    margin-top: 10px;
+    font-weight: 600;
+    font-size: 13px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 4px;
+  }
+  .build pre {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    white-space: pre-wrap;
+    color: var(--quiet);
+  }
+  .build summary {
+    cursor: pointer;
+  }
+  .build.err {
+    border-color: var(--bad);
+  }
+  b.no {
+    color: var(--bad);
+  }
+  .ended {
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    font-weight: 600;
+  }
+  .ended.err {
+    background: var(--warn-bg);
   }
   .tool-name {
     font-weight: 600;
