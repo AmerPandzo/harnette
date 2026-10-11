@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use harness_core::policy::{Policy, default_toml, policy_path};
 use harness_core::tasks::{self, StatusKind, TaskSummary};
 use harness_core::watch::{TaskWatcher, watch_tasks};
 use harness_core::{Mode, RunConfig, RunEvent, RunHandle, start_run as start_core_run};
@@ -124,6 +125,28 @@ fn set_task_status(repo: String, slug: String, status: StatusKind) -> Result<(),
     tasks::set_status(&expand_home(&repo), &slug, status).map_err(err)
 }
 
+/// The repo's policy file, or the commented template when it has none yet.
+#[tauri::command]
+fn read_policy(repo: String) -> Result<(String, bool), String> {
+    let path = policy_path(&expand_home(&repo));
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok((text, true)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((default_toml().to_string(), false)),
+        Err(e) => Err(format!("reading {}: {e}", path.display())),
+    }
+}
+
+/// Validates before writing, so a typo never reaches harness-guard.
+#[tauri::command]
+fn save_policy(repo: String, text: String) -> Result<(), String> {
+    Policy::from_toml(&text).map_err(err)?;
+    let path = policy_path(&expand_home(&repo));
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -140,7 +163,9 @@ pub fn run() {
             list_tasks,
             read_task,
             write_task,
-            set_task_status
+            set_task_status,
+            read_policy,
+            save_policy
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

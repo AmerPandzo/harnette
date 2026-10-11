@@ -4,6 +4,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import Board from "$lib/Board.svelte";
+  import PolicyView from "$lib/PolicyView.svelte";
   import RunView from "$lib/RunView.svelte";
   import TaskDetail from "$lib/TaskDetail.svelte";
   import { answer, initRunEvents, onRunExit, run, startRun } from "$lib/run.svelte";
@@ -15,7 +16,7 @@
   let tasks = $state<TaskSummary[]>([]);
   let selected = $state<string | null>(null);
   let version = $state(0);
-  let tab = $state<"board" | "run">("board");
+  let tab = $state<"board" | "run" | "policy">("board");
   let recent = $state<string[]>(JSON.parse(remembered("harness.recentRepos", "[]")));
   const repoName = (p: string) => p.split("/").filter(Boolean).at(-1) ?? p;
 
@@ -107,6 +108,7 @@
       <button class:on={tab === "run"} onclick={() => (tab = "run")}>
         Run{#if run.running}<span class="dot" title="Running"></span>{/if}
       </button>
+      <button class:on={tab === "policy"} onclick={() => (tab = "policy")} disabled={!repo}>Policy</button>
     </nav>
     <div class="status">
       {#if run.quota}
@@ -161,6 +163,8 @@
           {/if}
         </div>
       {/if}
+    {:else if tab === "policy"}
+      <PolicyView {repo} />
     {:else}
       <RunView {repo} />
     {/if}

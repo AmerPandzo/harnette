@@ -2,7 +2,7 @@
 //! stdout carries events and permission requests, stdin carries our answers and steering notes.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
 use crate::event::{Parsed, RunEvent, parse_line, summarize_tool};
 use crate::journal::{Journal, new_run_id};
-use crate::policy::{self, Verdict};
+use crate::policy::{Policy, Role, Verdict};
 use crate::prompt;
 use crate::tasks;
 
@@ -29,13 +29,24 @@ pub enum Mode {
     Refine,
 }
 
+impl Mode {
+    pub fn role(&self) -> Role {
+        match self {
+            Mode::Analyze { .. } | Mode::Refine => Role::Analyst,
+        }
+    }
+}
+
 pub struct RunConfig {
     pub repo: PathBuf,
     pub slug: String,
     pub mode: Mode,
     pub model: Option<String>,
-    pub ask_timeout: Duration,
+    /// Overrides `shell.ask_timeout_min` from the policy.
+    pub ask_timeout: Option<Duration>,
     pub claude_bin: String,
+    /// Path to `harness-guard`; found next to the running executable when unset.
+    pub guard_bin: Option<PathBuf>,
 }
 
 impl RunConfig {
@@ -45,8 +56,9 @@ impl RunConfig {
             slug: slug.into(),
             mode,
             model: None,
-            ask_timeout: Duration::from_secs(10 * 60),
+            ask_timeout: None,
             claude_bin: "claude".into(),
+            guard_bin: None,
         }
     }
 }
@@ -147,12 +159,39 @@ fn exclude_ai_tasks(repo: &std::path::Path) {
     }
 }
 
+/// `harness-guard` sits next to the app binary (`target/debug/`), or one level up for examples.
+fn find_guard(cfg: &RunConfig) -> anyhow::Result<PathBuf> {
+    if let Some(p) = &cfg.guard_bin {
+        return Ok(p.clone());
+    }
+    if let Some(p) = std::env::var_os("HARNESS_GUARD") {
+        return Ok(PathBuf::from(p));
+    }
+    let name = format!("harness-guard{}", std::env::consts::EXE_SUFFIX);
+    let exe = std::env::current_exe()?;
+    exe.ancestors()
+        .skip(1)
+        .take(2)
+        .map(|dir| dir.join(&name))
+        .find(|p| p.is_file())
+        .with_context(|| format!("{name} not found next to {}; build it with `cargo build -p harness-core --bin harness-guard`", exe.display()))
+}
+
+/// POSIX single-quote for the hook command line.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 pub async fn start_run<F>(cfg: RunConfig, sink: F) -> anyhow::Result<RunHandle>
 where
     F: Fn(RunEvent) + Send + Sync + 'static,
 {
     validate(&cfg)?;
     let repo = cfg.repo.canonicalize()?;
+    let policy = Arc::new(Policy::load(&repo)?);
+    let role = cfg.mode.role();
+    let ask_timeout = cfg.ask_timeout.unwrap_or(Duration::from_secs(policy.shell.ask_timeout_min * 60));
+    let guard = find_guard(&cfg)?;
     exclude_ai_tasks(&repo);
     let run_id = new_run_id();
     let journal = Arc::new(Mutex::new(Journal::open(&repo, &cfg.slug, &run_id)?));
@@ -170,8 +209,8 @@ where
         .args(["--permission-prompts", "host", "--permission-prompt-tool", "stdio"])
         // User-level hooks and permission rules could decide prompts before we see them.
         .args(["--setting-sources", "project,local"])
-        .arg("--allowedTools")
-        .args(policy::PRE_ALLOWED_TOOLS);
+        // harness-guard sees every tool call; anything it cannot allow or deny comes back to us as a prompt.
+        .args(["--settings", &guard_settings(&guard, &repo, role)]);
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
     }
@@ -223,7 +262,7 @@ where
     let reader = {
         let inner = inner.clone();
         let repo = repo.clone();
-        let ask_timeout = cfg.ask_timeout;
+        let policy = policy.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -232,7 +271,21 @@ where
                     Parsed::Events(events) => {
                         for e in events {
                             let finished = matches!(e, RunEvent::Finished { .. });
+                            // harness-guard decides allow/deny silently; mirror its verdict into the journal.
+                            let guard_verdict = match &e {
+                                RunEvent::ToolUse { id, tool, summary, input } => {
+                                    match policy.evaluate(role, tool, input, &repo) {
+                                        Verdict::Allow(rule) => Some((id.clone(), tool.clone(), summary.clone(), true, rule)),
+                                        Verdict::Deny(rule) => Some((id.clone(), tool.clone(), summary.clone(), false, rule)),
+                                        Verdict::Ask => None,
+                                    }
+                                }
+                                _ => None,
+                            };
                             (inner.emit)(e);
+                            if let Some((request_id, tool, summary, allowed, rule)) = guard_verdict {
+                                (inner.emit)(RunEvent::PermissionAuto { request_id, tool, summary, allowed, rule });
+                            }
                             if finished {
                                 // Closing stdin lets the CLI exit cleanly after its result.
                                 inner.stdin.lock().await.take();
@@ -240,7 +293,7 @@ where
                         }
                     }
                     Parsed::PermissionRequest { request_id, tool, input } => {
-                        handle_permission(&inner, &repo, ask_timeout, request_id, tool, input).await;
+                        handle_permission(&inner, &policy, role, &repo, ask_timeout, request_id, tool, input).await;
                     }
                     Parsed::Ignored => {}
                 }
@@ -276,9 +329,29 @@ where
     Ok(RunHandle { inner })
 }
 
-async fn handle_permission(inner: &Arc<Inner>, repo: &std::path::Path, ask_timeout: Duration, request_id: String, tool: String, input: Value) {
+fn guard_settings(guard: &Path, repo: &Path, role: Role) -> String {
+    let command = format!(
+        "{} --repo {} --role {}",
+        sh_quote(&guard.display().to_string()),
+        sh_quote(&repo.display().to_string()),
+        role.as_str()
+    );
+    json!({ "hooks": { "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }] } }).to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_permission(
+    inner: &Arc<Inner>,
+    policy: &Policy,
+    role: Role,
+    repo: &std::path::Path,
+    ask_timeout: Duration,
+    request_id: String,
+    tool: String,
+    input: Value,
+) {
     let summary = summarize_tool(&tool, &input);
-    match policy::evaluate(&tool, &input, repo) {
+    match policy.evaluate(role, &tool, &input, repo) {
         Verdict::Allow(rule) => {
             (inner.emit)(RunEvent::PermissionAuto { request_id: request_id.clone(), tool, summary, allowed: true, rule });
             respond(inner, &request_id, true, input, "").await;
@@ -310,5 +383,19 @@ async fn handle_permission(inner: &Arc<Inner>, repo: &std::path::Path, ask_timeo
                 respond(&inner, &request_id, allowed, input, message).await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_command_quotes_paths() {
+        assert_eq!(sh_quote("/a b/it's"), r#"'/a b/it'\''s'"#);
+        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/harness-guard"), Path::new("/my repo"), Role::Analyst)).unwrap();
+        let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, "'/x/harness-guard' --repo '/my repo' --role analyst");
+        assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "*");
     }
 }

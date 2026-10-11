@@ -1,8 +1,12 @@
-//! Spike-sized guardrail policy for the Analyze role.
-//! Later phases load this from `.ai-tasks/policy.toml`; the decision shape stays the same.
+//! Guardrail policy, loaded from `<repo>/.ai-tasks/policy.toml` over built-in defaults.
+//! The same `evaluate` runs in `harness-guard` (every tool call) and in the host handler (asks),
+//! so both layers always agree.
 
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -12,51 +16,414 @@ pub enum Verdict {
     Ask,
 }
 
-/// Tools the CLI may use without asking us (passed as `--allowedTools`).
-pub const PRE_ALLOWED_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
-
-const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "TodoWrite"];
-const WRITE_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit"];
-const DENIED_GIT: &[&str] = &["push", "commit", "reset", "stash", "checkout", "rebase", "merge", "switch", "restore", "clean"];
-const READ_ONLY_GIT: &[&str] = &["status", "log", "diff", "show", "blame", "ls-files", "grep", "branch", "rev-parse"];
-const READ_ONLY_COMMANDS: &[&str] = &["ls", "pwd", "wc", "head", "tail", "cat", "rg", "grep", "tree", "file"];
-/// Anything that chains, pipes, redirects or substitutes is not a single plain command.
-const SHELL_OPERATORS: &[&str] = &["&&", "||", ";", "|", "`", "$(", ">", "<", "\n"];
-
-pub fn evaluate(tool: &str, input: &Value, repo: &Path) -> Verdict {
-    if READ_ONLY_TOOLS.contains(&tool) {
-        return Verdict::Allow("read-only tool".into());
-    }
-    if WRITE_TOOLS.contains(&tool) {
-        let path = input.get("file_path").or_else(|| input.get("notebook_path")).and_then(Value::as_str);
-        return match path {
-            Some(p) if is_inside(&resolve(repo, p), &repo.join(".ai-tasks")) => {
-                Verdict::Allow("write inside .ai-tasks/".into())
-            }
-            _ => Verdict::Deny("Analysis only: you may write only the task doc under .ai-tasks/.".into()),
-        };
-    }
-    if tool == "Bash" {
-        let command = input.get("command").and_then(Value::as_str).unwrap_or_default();
-        return evaluate_bash(command);
-    }
-    Verdict::Ask
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Analyst,
+    Implementer,
+    Reviewer,
 }
 
-fn evaluate_bash(command: &str) -> Verdict {
-    let words: Vec<&str> = command.split(|c: char| c.is_whitespace() || ";|&()`".contains(c)).filter(|w| !w.is_empty()).collect();
-    if let Some(verb) = git_verbs(&words).into_iter().find(|v| DENIED_GIT.contains(v)) {
-        return Verdict::Deny(format!("git {verb} is not allowed for agents; Harness handles delivery."));
-    }
-    if SHELL_OPERATORS.iter().any(|op| command.contains(op)) {
-        return Verdict::Ask;
-    }
-    match words.as_slice() {
-        ["git", rest @ ..] if git_verbs(&words).first().is_some_and(|v| READ_ONLY_GIT.contains(v)) && !rest.is_empty() => {
-            Verdict::Allow("read-only git".into())
+impl FromStr for Role {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "analyst" => Ok(Self::Analyst),
+            "implementer" => Ok(Self::Implementer),
+            "reviewer" => Ok(Self::Reviewer),
+            other => anyhow::bail!("unknown role {other:?}"),
         }
-        [cmd, ..] if READ_ONLY_COMMANDS.contains(cmd) => Verdict::Allow("read-only command".into()),
-        _ => Verdict::Ask,
+    }
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Analyst => "analyst",
+            Self::Implementer => "implementer",
+            Self::Reviewer => "reviewer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnQuota {
+    Ask,
+    Reassign,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditScope {
+    Task,
+    Repo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnOutOfScope {
+    Warn,
+    Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnBreach {
+    Warn,
+    Pause,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    None,
+    Commit,
+    Push,
+    Pr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Approval {
+    Ask,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Roles {
+    pub analyst: String,
+    pub implementer: String,
+    pub reviewer: String,
+    pub on_quota_exhausted: OnQuota,
+}
+
+impl Default for Roles {
+    fn default() -> Self {
+        Self {
+            analyst: "claude".into(),
+            implementer: "claude".into(),
+            reviewer: "claude".into(),
+            on_quota_exhausted: OnQuota::Ask,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Git {
+    pub deny: Vec<String>,
+}
+
+impl Default for Git {
+    fn default() -> Self {
+        let verbs = ["push", "commit", "reset", "stash", "checkout", "rebase", "merge", "switch", "restore", "clean"];
+        Self { deny: verbs.map(String::from).to_vec() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Shell {
+    /// Command prefixes, matched word by word: `git diff` allows `git diff --stat`.
+    pub allow: Vec<String>,
+    /// Pipes, chains, redirects and subshells are refused with a reason, so the agent retries plainly.
+    pub single_command: bool,
+    pub unlisted: Access,
+    pub ask_timeout_min: u64,
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        let allow = [
+            "ls", "pwd", "wc", "head", "tail", "cat", "rg", "grep", "tree", "file", "git status", "git log", "git diff",
+            "git show", "git blame", "git ls-files", "git grep", "git rev-parse", "git branch --show-current",
+        ];
+        Self { allow: allow.map(String::from).to_vec(), single_command: true, unlisted: Access::Ask, ask_timeout_min: 10 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Read {
+    pub outside_repo: Access,
+}
+
+impl Default for Read {
+    fn default() -> Self {
+        Self { outside_repo: Access::Ask }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Edits {
+    pub scope: EditScope,
+    pub on_out_of_scope: OnOutOfScope,
+}
+
+impl Default for Edits {
+    fn default() -> Self {
+        Self { scope: EditScope::Task, on_out_of_scope: OnOutOfScope::Warn }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Web {
+    pub access: Access,
+}
+
+impl Default for Web {
+    fn default() -> Self {
+        Self { access: Access::Ask }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Budget {
+    pub tokens_per_task: Option<u64>,
+    pub minutes_per_run: Option<u64>,
+    pub idle_minutes: Option<u64>,
+    pub on_breach: OnBreach,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self { tokens_per_task: None, minutes_per_run: None, idle_minutes: None, on_breach: OnBreach::Pause }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Build {
+    pub command: Option<String>,
+    pub requires: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunLimits {
+    pub max_rounds: u32,
+}
+
+impl Default for RunLimits {
+    fn default() -> Self {
+        Self { max_rounds: 3 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Delivery {
+    pub mode: DeliveryMode,
+    pub approval: Approval,
+    pub branch: String,
+    pub protected: Vec<String>,
+    pub force_push: bool,
+}
+
+impl Default for Delivery {
+    fn default() -> Self {
+        Self {
+            mode: DeliveryMode::None,
+            approval: Approval::Ask,
+            branch: "ai/{slug}".into(),
+            protected: ["main", "master", "develop", "release/*"].map(String::from).to_vec(),
+            force_push: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Policy {
+    pub roles: Roles,
+    pub git: Git,
+    pub shell: Shell,
+    pub read: Read,
+    pub edits: Edits,
+    pub web: Web,
+    pub budget: Budget,
+    pub build: Build,
+    pub run: RunLimits,
+    pub delivery: Delivery,
+}
+
+pub fn policy_path(repo: &Path) -> PathBuf {
+    repo.join(".ai-tasks").join("policy.toml")
+}
+
+/// Commented template; parses to `Policy::default()` (tested).
+pub fn default_toml() -> &'static str {
+    r#"# Harness policy for this repository. Missing keys use these defaults; a list replaces the default list.
+
+[roles]                       # factory of one: the same worker may fill every role
+analyst = "claude"
+implementer = "claude"
+reviewer = "claude"
+on_quota_exhausted = "ask"    # "ask" | "reassign" | "stop"
+
+[git]                         # applies to agents; delivery is done by the app
+deny = ["push", "commit", "reset", "stash", "checkout", "rebase", "merge", "switch", "restore", "clean"]
+
+[shell]
+# Command prefixes matched word by word ("git diff" allows "git diff --stat"). Add build tools here, e.g. "mvn", "./mvnw", "npm test".
+allow = ["ls", "pwd", "wc", "head", "tail", "cat", "rg", "grep", "tree", "file",
+         "git status", "git log", "git diff", "git show", "git blame", "git ls-files", "git grep", "git rev-parse",
+         "git branch --show-current"]
+single_command = true         # refuse pipes, &&, ;, redirects and subshells with a reason
+unlisted = "ask"              # "ask" | "deny" | "allow"
+ask_timeout_min = 10          # unanswered asks are denied after this
+
+[read]
+outside_repo = "ask"          # Read/Grep/Glob outside the repository: "ask" | "deny" | "allow"
+
+[edits]                       # implementer only (analyst and reviewer write only .ai-tasks/*.md)
+scope = "task"                # "task" | "repo"
+on_out_of_scope = "warn"      # "warn" | "block"
+
+[web]
+access = "ask"                # WebFetch / WebSearch: "ask" | "deny" | "allow"
+
+[budget]                      # enforced from phase 1d
+# tokens_per_task = 2_000_000
+# minutes_per_run = 45
+# idle_minutes = 10
+on_breach = "pause"           # "warn" | "pause" | "stop"
+
+[build]                       # used by the run loop from phase 1c
+# command = "mvn -B verify"
+requires = []                 # e.g. ["docker"]
+
+[run]
+max_rounds = 3
+
+[delivery]                    # runs only after the Done gate passes (phase 1f)
+mode = "none"                 # "none" | "commit" | "push" | "pr"
+approval = "ask"              # "ask" | "auto"
+branch = "ai/{slug}"
+protected = ["main", "master", "develop", "release/*"]
+force_push = false
+"#
+}
+
+impl Policy {
+    pub fn from_toml(text: &str) -> anyhow::Result<Self> {
+        toml::from_str(text).context("invalid policy.toml")
+    }
+
+    /// Defaults overridden by the repo's `.ai-tasks/policy.toml`, if present.
+    pub fn load(repo: &Path) -> anyhow::Result<Self> {
+        let path = policy_path(repo);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::from_toml(&text).with_context(|| path.display().to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub fn evaluate(&self, role: Role, tool: &str, input: &Value, repo: &Path) -> Verdict {
+        let field = |k: &str| input.get(k).and_then(Value::as_str);
+        match tool {
+            "Read" | "NotebookRead" | "Grep" | "Glob" | "LS" => {
+                let path = field("file_path").or_else(|| field("notebook_path")).or_else(|| field("path"));
+                match path {
+                    Some(p) if !is_inside(&resolve(repo, p), repo) => access(self.read.outside_repo, "reading outside the repository"),
+                    _ => Verdict::Allow("read inside the repository".into()),
+                }
+            }
+            "TodoWrite" => Verdict::Allow("planning tool".into()),
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+                let Some(p) = field("file_path").or_else(|| field("notebook_path")) else {
+                    return Verdict::Deny("write without a file path".into());
+                };
+                write_verdict(role, &resolve(repo, p), repo)
+            }
+            "Bash" => self.bash(field("command").unwrap_or_default()),
+            "WebFetch" | "WebSearch" => access(self.web.access, "web access"),
+            _ => Verdict::Ask,
+        }
+    }
+
+    fn bash(&self, command: &str) -> Verdict {
+        let words: Vec<&str> =
+            command.split(|c: char| c.is_whitespace() || ";|&()`".contains(c)).filter(|w| !w.is_empty()).collect();
+        if let Some(verb) = git_verbs(&words).into_iter().find(|v| self.git.deny.iter().any(|d| d == v)) {
+            return Verdict::Deny(format!("git {verb} is not allowed for agents; Harness handles delivery."));
+        }
+        if SHELL_OPERATORS.iter().any(|op| command.contains(op)) {
+            return if self.shell.single_command {
+                Verdict::Deny(
+                    "Run one plain command per call: no pipes, &&, ;, redirects or subshells. Retry without them.".into(),
+                )
+            } else {
+                access(self.shell.unlisted, "this compound command")
+            };
+        }
+        let plain: Vec<&str> = command.split_whitespace().collect();
+        let listed = self.shell.allow.iter().find(|entry| {
+            let prefix: Vec<&str> = entry.split_whitespace().collect();
+            !prefix.is_empty() && plain.starts_with(&prefix)
+        });
+        match listed {
+            Some(entry) => Verdict::Allow(format!("shell.allow: {entry}")),
+            None => access(self.shell.unlisted, "this command"),
+        }
+    }
+}
+
+const SHELL_OPERATORS: &[&str] = &["&&", "||", ";", "|", "`", "$(", ">", "<", "\n"];
+
+fn access(a: Access, what: &str) -> Verdict {
+    match a {
+        Access::Allow => Verdict::Allow(format!("policy allows {what}")),
+        Access::Ask => Verdict::Ask,
+        Access::Deny => Verdict::Deny(format!("Policy does not allow {what}.")),
+    }
+}
+
+fn write_verdict(role: Role, path: &Path, repo: &Path) -> Verdict {
+    let tasks = repo.join(".ai-tasks");
+    if path == policy_path(repo) {
+        return Verdict::Deny("Agents may not change the Harness policy.".into());
+    }
+    if is_inside(path, &tasks.join("runs")) {
+        return Verdict::Deny("Run journals are written by Harness only.".into());
+    }
+    match role {
+        Role::Analyst | Role::Reviewer => {
+            let is_task_doc = path.parent() == Some(tasks.as_path()) && path.extension().is_some_and(|e| e == "md");
+            if is_task_doc {
+                Verdict::Allow("task doc in .ai-tasks/".into())
+            } else {
+                Verdict::Deny(format!(
+                    "The {} may write only task docs (.ai-tasks/<slug>.md), not source files.",
+                    role.as_str()
+                ))
+            }
+        }
+        Role::Implementer => {
+            if !is_inside(path, repo) {
+                Verdict::Deny("Writes outside the repository are not allowed.".into())
+            } else if is_inside(path, &repo.join(".git")) {
+                Verdict::Deny("Agents may not write inside .git/.".into())
+            } else {
+                Verdict::Allow("write inside the repository".into())
+            }
+        }
     }
 }
 
@@ -83,7 +450,7 @@ fn git_verbs<'a>(words: &[&'a str]) -> Vec<&'a str> {
 
 fn resolve(repo: &Path, p: &str) -> PathBuf {
     let joined = if Path::new(p).is_absolute() { PathBuf::from(p) } else { repo.join(p) };
-    // Lexical normalization: `..` must not escape the check.
+    // Lexical normalization: `..` must not escape the checks.
     let mut out = PathBuf::new();
     for c in joined.components() {
         match c {
@@ -101,6 +468,31 @@ fn is_inside(path: &Path, dir: &Path) -> bool {
     path.starts_with(dir) && path != dir
 }
 
+/// PreToolUse hook answer for `harness-guard`. Never fails open: any error asks the human.
+pub fn hook_response(repo: &Path, role: Role, hook_input: &str) -> String {
+    let (decision, reason) = match decide_hook(repo, role, hook_input) {
+        Ok(Verdict::Allow(rule)) => ("allow", rule),
+        Ok(Verdict::Deny(reason)) => ("deny", reason),
+        Ok(Verdict::Ask) => ("ask", "Harness asks the human supervisor.".to_string()),
+        Err(e) => ("ask", format!("harness-guard could not decide ({e:#}); asking the human.")),
+    };
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+    })
+    .to_string()
+}
+
+fn decide_hook(repo: &Path, role: Role, hook_input: &str) -> anyhow::Result<Verdict> {
+    let v: Value = serde_json::from_str(hook_input).context("hook input is not JSON")?;
+    let tool = v.get("tool_name").and_then(Value::as_str).context("hook input has no tool_name")?;
+    let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+    Ok(Policy::load(repo)?.evaluate(role, tool, &input, repo))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,43 +502,105 @@ mod tests {
         PathBuf::from("/work/repo")
     }
 
-    fn bash(cmd: &str) -> Verdict {
-        evaluate("Bash", &json!({ "command": cmd }), &repo())
+    fn eval(p: &Policy, role: Role, tool: &str, input: Value) -> Verdict {
+        p.evaluate(role, tool, &input, &repo())
+    }
+
+    fn bash(p: &Policy, cmd: &str) -> Verdict {
+        eval(p, Role::Analyst, "Bash", json!({ "command": cmd }))
     }
 
     #[test]
-    fn writes_only_inside_ai_tasks() {
-        let write = |p: &str| evaluate("Write", &json!({ "file_path": p }), &repo());
-        assert!(matches!(write("/work/repo/.ai-tasks/x.md"), Verdict::Allow(_)));
-        assert!(matches!(write(".ai-tasks/x.md"), Verdict::Allow(_)));
-        assert!(matches!(write("/work/repo/src/main.rs"), Verdict::Deny(_)));
-        assert!(matches!(write("/work/repo/.ai-tasks/../src/main.rs"), Verdict::Deny(_)));
-        assert!(matches!(write("/work/repo/.ai-tasks-evil/x.md"), Verdict::Deny(_)));
-        assert!(matches!(evaluate("Edit", &json!({}), &repo()), Verdict::Deny(_)));
+    fn template_parses_to_defaults() {
+        assert_eq!(Policy::from_toml(default_toml()).unwrap(), Policy::default());
+        assert_eq!(Policy::from_toml("").unwrap(), Policy::default());
     }
 
     #[test]
-    fn denies_dangerous_git_anywhere_in_the_command() {
-        assert!(matches!(bash("git push origin main"), Verdict::Deny(_)));
-        assert!(matches!(bash("git -C other stash"), Verdict::Deny(_)));
-        assert!(matches!(bash("ls && git commit -m x"), Verdict::Deny(_)));
-        assert!(matches!(bash("echo hi; git reset --hard"), Verdict::Deny(_)));
+    fn toml_overrides_and_validation() {
+        let p = Policy::from_toml("[shell]\nallow = [\"mvn\"]\nunlisted = \"deny\"\n[run]\nmax_rounds = 5").unwrap();
+        assert_eq!(p.shell.allow, vec!["mvn"]);
+        assert_eq!(p.shell.unlisted, Access::Deny);
+        assert!(p.shell.single_command, "unset keys keep defaults");
+        assert_eq!(p.run.max_rounds, 5);
+        assert!(Policy::from_toml("[shell]\nalow = []").is_err(), "typo must be rejected");
+        assert!(Policy::from_toml("[delivery]\nmode = \"yolo\"").is_err());
     }
 
     #[test]
-    fn allows_plain_read_only_commands() {
-        assert!(matches!(bash("git status"), Verdict::Allow(_)));
-        assert!(matches!(bash("git log --oneline -5"), Verdict::Allow(_)));
-        assert!(matches!(bash("ls -la src"), Verdict::Allow(_)));
+    fn analyst_and_reviewer_write_only_task_docs() {
+        let p = Policy::default();
+        let w = |role, path: &str| eval(&p, role, "Write", json!({ "file_path": path }));
+        assert!(matches!(w(Role::Analyst, ".ai-tasks/T-1.md"), Verdict::Allow(_)));
+        assert!(matches!(w(Role::Reviewer, "/work/repo/.ai-tasks/T-1.md"), Verdict::Allow(_)));
+        assert!(matches!(w(Role::Analyst, "src/main.rs"), Verdict::Deny(_)));
+        assert!(matches!(w(Role::Analyst, ".ai-tasks/../src/x.md"), Verdict::Deny(_)));
+        assert!(matches!(w(Role::Analyst, ".ai-tasks/runs/T-1/x.md"), Verdict::Deny(_)));
+        assert!(matches!(w(Role::Analyst, ".ai-tasks/notes/x.md"), Verdict::Deny(_)));
+        assert!(matches!(w(Role::Analyst, ".ai-tasks/policy.toml"), Verdict::Deny(_)));
+        assert!(matches!(eval(&p, Role::Analyst, "Edit", json!({})), Verdict::Deny(_)));
     }
 
     #[test]
-    fn asks_for_everything_else() {
-        assert_eq!(bash("mvn test"), Verdict::Ask);
-        assert_eq!(bash("git log | head"), Verdict::Ask);
-        assert_eq!(bash("cat a > b"), Verdict::Ask);
-        assert_eq!(bash("rm -rf target"), Verdict::Ask);
-        assert_eq!(bash("git"), Verdict::Ask);
-        assert_eq!(evaluate("WebFetch", &json!({ "url": "https://x" }), &repo()), Verdict::Ask);
+    fn implementer_writes_inside_repo_but_not_git_runs_or_policy() {
+        let p = Policy::default();
+        let w = |path: &str| eval(&p, Role::Implementer, "Edit", json!({ "file_path": path }));
+        assert!(matches!(w("src/main.rs"), Verdict::Allow(_)));
+        assert!(matches!(w(".ai-tasks/T-1.md"), Verdict::Allow(_)));
+        assert!(matches!(w(".git/config"), Verdict::Deny(_)));
+        assert!(matches!(w(".ai-tasks/policy.toml"), Verdict::Deny(_)));
+        assert!(matches!(w(".ai-tasks/runs/x"), Verdict::Deny(_)));
+        assert!(matches!(w("/etc/hosts"), Verdict::Deny(_)));
+    }
+
+    #[test]
+    fn reads_outside_the_repo_follow_policy() {
+        let p = Policy::default();
+        let r = |input| eval(&p, Role::Analyst, "Read", input);
+        assert!(matches!(r(json!({ "file_path": "/work/repo/src/a.rs" })), Verdict::Allow(_)));
+        assert_eq!(r(json!({ "file_path": "/Users/me/.ssh/id_rsa" })), Verdict::Ask);
+        assert_eq!(r(json!({ "file_path": "/work/repo/../other/x" })), Verdict::Ask);
+        assert!(matches!(eval(&p, Role::Analyst, "Grep", json!({ "pattern": "x" })), Verdict::Allow(_)));
+        let strict = Policy::from_toml("[read]\noutside_repo = \"deny\"").unwrap();
+        assert!(matches!(eval(&strict, Role::Analyst, "Glob", json!({ "pattern": "*", "path": "/tmp" })), Verdict::Deny(_)));
+    }
+
+    #[test]
+    fn shell_rules() {
+        let p = Policy::default();
+        assert!(matches!(bash(&p, "git push origin main"), Verdict::Deny(_)));
+        assert!(matches!(bash(&p, "git -C other stash"), Verdict::Deny(_)));
+        assert!(matches!(bash(&p, "ls && git commit -m x"), Verdict::Deny(_)));
+        assert!(matches!(bash(&p, "git log --oneline -5"), Verdict::Allow(_)));
+        assert!(matches!(bash(&p, "ls -la src"), Verdict::Allow(_)));
+        assert_eq!(bash(&p, "git branch -D main"), Verdict::Ask, "only --show-current is listed");
+        assert_eq!(bash(&p, "mvn test"), Verdict::Ask);
+        assert_eq!(bash(&p, "rm -rf target"), Verdict::Ask);
+        assert!(matches!(bash(&p, "git log | head"), Verdict::Deny(r) if r.contains("one plain command")));
+        let loose = Policy::from_toml("[shell]\nsingle_command = false\nallow = [\"mvn\"]").unwrap();
+        assert_eq!(bash(&loose, "git log | head"), Verdict::Ask);
+        assert!(matches!(bash(&loose, "mvn -B verify"), Verdict::Allow(_)));
+        assert!(matches!(bash(&loose, "mvnw test"), Verdict::Ask), "prefix is word-wise, not character-wise");
+    }
+
+    #[test]
+    fn web_and_unknown_tools() {
+        let p = Policy::default();
+        assert_eq!(eval(&p, Role::Analyst, "WebFetch", json!({ "url": "https://x" })), Verdict::Ask);
+        assert_eq!(eval(&p, Role::Analyst, "Task", json!({})), Verdict::Ask);
+        assert!(matches!(eval(&p, Role::Analyst, "TodoWrite", json!({})), Verdict::Allow(_)));
+    }
+
+    #[test]
+    fn hook_response_shapes() {
+        let decision = |input: &str| -> String {
+            let out: Value = serde_json::from_str(&hook_response(Path::new("/nonexistent/repo"), Role::Analyst, input)).unwrap();
+            out["hookSpecificOutput"]["permissionDecision"].as_str().unwrap().to_string()
+        };
+        assert_eq!(decision(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#), "allow");
+        assert_eq!(decision(r#"{"tool_name":"Bash","tool_input":{"command":"git push"}}"#), "deny");
+        assert_eq!(decision(r#"{"tool_name":"Bash","tool_input":{"command":"mvn test"}}"#), "ask");
+        assert_eq!(decision("not json"), "ask");
+        assert_eq!(decision(r#"{"tool_input":{}}"#), "ask");
     }
 }

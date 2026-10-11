@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.harness.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "cargo build -q -p harness-core --bin harness-guard && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "cargo build -q --release -p harness-core --bin harness-guard && npm run build",
     "frontendDist": "../build"
   },
   "app": {

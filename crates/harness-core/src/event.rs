@@ -10,7 +10,14 @@ pub enum RunEvent {
     Started { run_id: String, slug: String },
     Session { session_id: String, model: String },
     Text { text: String },
-    ToolUse { id: String, tool: String, summary: String },
+    ToolUse {
+        id: String,
+        tool: String,
+        summary: String,
+        /// Full tool input for policy checks; not sent to the UI or journal (Write content can be large).
+        #[serde(skip)]
+        input: Value,
+    },
     ToolResult { tool_use_id: String, is_error: bool, summary: String },
     /// Decided by policy without asking the human.
     PermissionAuto { request_id: String, tool: String, summary: String, allowed: bool, rule: String },
@@ -98,7 +105,7 @@ pub fn parse_line(line: &str) -> Parsed {
                     Some("tool_use") => {
                         let tool = str_at(c, "name");
                         let input = c.get("input").cloned().unwrap_or(Value::Null);
-                        Some(RunEvent::ToolUse { id: str_at(c, "id"), summary: summarize_tool(&tool, &input), tool })
+                        Some(RunEvent::ToolUse { id: str_at(c, "id"), summary: summarize_tool(&tool, &input), tool, input })
                     }
                     _ => None,
                 })
@@ -171,7 +178,12 @@ mod tests {
             parse_line(line),
             Parsed::Events(vec![
                 RunEvent::Text { text: "Hi".into() },
-                RunEvent::ToolUse { id: "t1".into(), tool: "Read".into(), summary: "/r/a.md".into() },
+                RunEvent::ToolUse {
+                    id: "t1".into(),
+                    tool: "Read".into(),
+                    summary: "/r/a.md".into(),
+                    input: json!({"file_path":"/r/a.md"})
+                },
             ])
         );
     }
