@@ -1,0 +1,48 @@
+//! Per-run journal under `<repo>/.ai-tasks/runs/<slug>/<run-id>/`.
+//! `events.jsonl` holds normalized events; `raw.jsonl` holds the agent's own output for debugging.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::json;
+
+use crate::event::RunEvent;
+
+pub struct Journal {
+    dir: PathBuf,
+    events: File,
+    raw: File,
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+pub fn new_run_id() -> String {
+    format!("run-{}", now_ms())
+}
+
+impl Journal {
+    pub fn open(repo: &Path, slug: &str, run_id: &str) -> anyhow::Result<Self> {
+        let dir = repo.join(".ai-tasks").join("runs").join(slug).join(run_id);
+        fs::create_dir_all(&dir)?;
+        let append = |name: &str| OpenOptions::new().create(true).append(true).open(dir.join(name));
+        Ok(Self { events: append("events.jsonl")?, raw: append("raw.jsonl")?, dir })
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn event(&mut self, event: &RunEvent) {
+        let line = json!({ "ts": now_ms() as u64, "event": event });
+        // A journal write failure must never stop the run.
+        let _ = writeln!(self.events, "{line}");
+    }
+
+    pub fn raw(&mut self, line: &str) {
+        let _ = writeln!(self.raw, "{line}");
+    }
+}
