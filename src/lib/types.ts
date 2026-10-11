@@ -38,6 +38,7 @@ export type Finished = {
   cost_usd: number;
   input_tokens: number;
   output_tokens: number;
+  new_tokens: number;
   duration_ms: number;
 };
 
@@ -51,7 +52,8 @@ export type RunEvent =
   | { kind: "permission_ask"; request_id: string; tool: string; summary: string }
   | { kind: "permission_answered"; request_id: string; allowed: boolean; by: string }
   | { kind: "note"; text: string }
-  | { kind: "quota"; five_hour: number; seven_day: number }
+  | { kind: "usage"; message_id: string; new_tokens: number }
+  | { kind: "quota"; status: string; five_hour: number; seven_day: number }
   | Finished
   | { kind: "error"; message: string }
   | { kind: "exited"; code: number | null }
@@ -59,7 +61,26 @@ export type RunEvent =
   | { kind: "checkpoint"; round: number; git_ref: string }
   | { kind: "build"; ok: boolean; command: string; duration_ms: number; tail: string; log: string }
   | { kind: "status_changed"; to: string; by: string; reason: string | null }
-  | { kind: "session_ended"; ok: boolean; summary: string };
+  | { kind: "session_ended"; ok: boolean; summary: string }
+  | { kind: "alarm"; alarm: string; message: string; action: "warn" | "pause" | "stop" }
+  | { kind: "paused"; reason: string }
+  | { kind: "resumed" };
+
+export type UsageSummary = {
+  day_tokens: number;
+  day_usd: number;
+  day_runs: number;
+  week_tokens: number;
+  week_usd: number;
+  week_runs: number;
+  top_tasks: { repo: string; slug: string; new_tokens: number; usd: number }[];
+};
+
+export function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
 
 export type Checkpoint = { round: number; git_ref: string; commit: string; created_unix: number };
 

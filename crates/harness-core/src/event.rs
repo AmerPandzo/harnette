@@ -25,13 +25,17 @@ pub enum RunEvent {
     PermissionAsk { request_id: String, tool: String, summary: String },
     PermissionAnswered { request_id: String, allowed: bool, by: String },
     Note { text: String },
-    Quota { five_hour: f64, seven_day: f64 },
+    /// Token usage of one assistant message; repeated per content block, so consumers dedupe by id.
+    Usage { message_id: String, new_tokens: u64 },
+    Quota { status: String, five_hour: f64, seven_day: f64 },
     Finished {
         ok: bool,
         result: String,
         cost_usd: f64,
         input_tokens: u64,
         output_tokens: u64,
+        /// input + cache writes + output; cache reads excluded (they are ~10x cheaper).
+        new_tokens: u64,
         duration_ms: u64,
     },
     Error { message: String },
@@ -42,6 +46,9 @@ pub enum RunEvent {
     Build { ok: bool, command: String, duration_ms: u64, tail: String, log: String },
     StatusChanged { to: String, by: String, reason: Option<String> },
     SessionEnded { ok: bool, summary: String },
+    Alarm { alarm: String, message: String, action: String },
+    Paused { reason: String },
+    Resumed,
 }
 
 /// One line of agent output, classified.
@@ -101,7 +108,14 @@ pub fn parse_line(line: &str) -> Parsed {
         }
         Some("assistant") => {
             let content = v.pointer("/message/content").and_then(Value::as_array).cloned().unwrap_or_default();
-            let events: Vec<RunEvent> = content
+            let usage = v.pointer("/message/usage").map(|u| {
+                let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                RunEvent::Usage {
+                    message_id: v.pointer("/message/id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    new_tokens: n("input_tokens") + n("cache_creation_input_tokens") + n("output_tokens"),
+                }
+            });
+            let mut events: Vec<RunEvent> = content
                 .iter()
                 .filter_map(|c| match c.get("type").and_then(Value::as_str) {
                     Some("text") => {
@@ -116,6 +130,7 @@ pub fn parse_line(line: &str) -> Parsed {
                     _ => None,
                 })
                 .collect();
+            events.extend(usage);
             Parsed::Events(events)
         }
         Some("user") => {
@@ -138,7 +153,8 @@ pub fn parse_line(line: &str) -> Parsed {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0)
             };
-            Parsed::Events(vec![RunEvent::Quota { five_hour: util("five_hour"), seven_day: util("seven_day") }])
+            let status = v.pointer("/rate_limit_info/status").and_then(Value::as_str).unwrap_or_default().to_string();
+            Parsed::Events(vec![RunEvent::Quota { status, five_hour: util("five_hour"), seven_day: util("seven_day") }])
         }
         Some("result") => {
             let num = |p: &str| v.pointer(p).and_then(Value::as_u64).unwrap_or(0);
@@ -149,6 +165,7 @@ pub fn parse_line(line: &str) -> Parsed {
                 cost_usd: v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
                 input_tokens: usage("input_tokens") + usage("cache_creation_input_tokens") + usage("cache_read_input_tokens"),
                 output_tokens: usage("output_tokens"),
+                new_tokens: usage("input_tokens") + usage("cache_creation_input_tokens") + usage("output_tokens"),
                 duration_ms: num("/duration_ms"),
             }])
         }
@@ -179,7 +196,7 @@ mod tests {
 
     #[test]
     fn parses_tool_use_and_text() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""},{"type":"text","text":"Hi"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/r/a.md"}}]}}"#;
+        let line = r#"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":2,"cache_read_input_tokens":9000,"cache_creation_input_tokens":30,"output_tokens":5},"content":[{"type":"thinking","thinking":""},{"type":"text","text":"Hi"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/r/a.md"}}]}}"#;
         assert_eq!(
             parse_line(line),
             Parsed::Events(vec![
@@ -190,6 +207,7 @@ mod tests {
                     summary: "/r/a.md".into(),
                     input: json!({"file_path":"/r/a.md"})
                 },
+                RunEvent::Usage { message_id: "m1".into(), new_tokens: 37 },
             ])
         );
     }
@@ -207,8 +225,11 @@ mod tests {
 
     #[test]
     fn parses_quota_and_result() {
-        let quota = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.25},"seven_day":{"utilization":0.5}}}}"#;
-        assert_eq!(parse_line(quota), Parsed::Events(vec![RunEvent::Quota { five_hour: 0.25, seven_day: 0.5 }]));
+        let quota = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.25},"seven_day":{"utilization":0.5}}}}"#;
+        assert_eq!(
+            parse_line(quota),
+            Parsed::Events(vec![RunEvent::Quota { status: "allowed".into(), five_hour: 0.25, seven_day: 0.5 }])
+        );
         let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","total_cost_usd":0.01,"duration_ms":900,"usage":{"input_tokens":4,"cache_creation_input_tokens":10,"cache_read_input_tokens":20,"output_tokens":7}}"#;
         assert_eq!(
             parse_line(result),
@@ -218,6 +239,7 @@ mod tests {
                 cost_usd: 0.01,
                 input_tokens: 34,
                 output_tokens: 7,
+                new_tokens: 21,
                 duration_ms: 900
             }])
         );

@@ -194,7 +194,10 @@ impl Default for Web {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Budget {
+    /// New tokens (input + cache writes + output) across all runs of a task; cache reads are not counted.
     pub tokens_per_task: Option<u64>,
+    /// API-equivalent dollars across all runs of a task; also passed to the CLI as a hard cap per run.
+    pub usd_per_task: Option<f64>,
     pub minutes_per_run: Option<u64>,
     pub idle_minutes: Option<u64>,
     pub on_breach: OnBreach,
@@ -202,7 +205,7 @@ pub struct Budget {
 
 impl Default for Budget {
     fn default() -> Self {
-        Self { tokens_per_task: None, minutes_per_run: None, idle_minutes: None, on_breach: OnBreach::Pause }
+        Self { tokens_per_task: None, usd_per_task: None, minutes_per_run: None, idle_minutes: None, on_breach: OnBreach::Pause }
     }
 }
 
@@ -298,10 +301,11 @@ on_out_of_scope = "warn"      # "warn" | "block"
 [web]
 access = "ask"                # WebFetch / WebSearch: "ask" | "deny" | "allow"
 
-[budget]                      # enforced from phase 1d
-# tokens_per_task = 2_000_000
-# minutes_per_run = 45
-# idle_minutes = 10
+[budget]                      # watchdog: 80% warns, 100% applies on_breach
+# tokens_per_task = 2_000_000 # new tokens across all runs of a task (cache reads not counted)
+# usd_per_task = 5.0          # API-equivalent dollars across all runs of a task; hard cap per run
+# minutes_per_run = 45        # wall clock of one Analyze/Refine run or one whole loop
+# idle_minutes = 10           # no agent activity for this long
 on_breach = "pause"           # "warn" | "pause" | "stop"
 
 [build]                       # used by the run loop from phase 1c
@@ -352,13 +356,13 @@ impl Policy {
                 };
                 write_verdict(role, &resolve(repo, p), repo)
             }
-            "Bash" => self.bash(field("command").unwrap_or_default()),
+            "Bash" => self.bash(field("command").unwrap_or_default(), repo),
             "WebFetch" | "WebSearch" => access(self.web.access, "web access"),
             _ => Verdict::Ask,
         }
     }
 
-    fn bash(&self, command: &str) -> Verdict {
+    fn bash(&self, command: &str, repo: &Path) -> Verdict {
         let words: Vec<&str> =
             command.split(|c: char| c.is_whitespace() || ";|&()`".contains(c)).filter(|w| !w.is_empty()).collect();
         if let Some(verb) = git_verbs(&words).into_iter().find(|v| self.git.deny.iter().any(|d| d == v)) {
@@ -373,7 +377,24 @@ impl Policy {
                 access(self.shell.unlisted, "this compound command")
             };
         }
-        let plain: Vec<&str> = command.split_whitespace().collect();
+        let mut plain: Vec<&str> = command.split_whitespace().collect();
+        if plain.first() == Some(&"git") {
+            // `git -C <dir> diff` is `git diff` run elsewhere: match on the subcommand, and treat
+            // a directory outside the repo as a read outside the repo.
+            let mut i = 1;
+            while i < plain.len() && plain[i].starts_with('-') {
+                if plain[i] == "-C" {
+                    match plain.get(i + 1) {
+                        Some(dir) if !is_inside_or_same(&resolve(repo, dir), repo) => {
+                            return access(self.read.outside_repo, "git in a directory outside the repository");
+                        }
+                        _ => {}
+                    }
+                }
+                i += if matches!(plain[i], "-C" | "-c") { 2 } else { 1 };
+            }
+            plain.drain(1..i.min(plain.len()));
+        }
         let listed = self.shell.allow.iter().find(|entry| {
             let prefix: Vec<&str> = entry.split_whitespace().collect();
             !prefix.is_empty() && plain.starts_with(&prefix)
@@ -462,6 +483,10 @@ fn resolve(repo: &Path, p: &str) -> PathBuf {
         }
     }
     out
+}
+
+fn is_inside_or_same(path: &Path, dir: &Path) -> bool {
+    path.starts_with(dir)
 }
 
 fn is_inside(path: &Path, dir: &Path) -> bool {
@@ -572,6 +597,10 @@ mod tests {
         assert!(matches!(bash(&p, "git -C other stash"), Verdict::Deny(_)));
         assert!(matches!(bash(&p, "ls && git commit -m x"), Verdict::Deny(_)));
         assert!(matches!(bash(&p, "git log --oneline -5"), Verdict::Allow(_)));
+        assert!(matches!(bash(&p, "git -C /work/repo diff -- src/a.rs"), Verdict::Allow(_)));
+        assert!(matches!(bash(&p, "git -C . --no-pager log"), Verdict::Allow(_)));
+        assert_eq!(bash(&p, "git -C /other/repo diff"), Verdict::Ask, "outside the repo follows read.outside_repo");
+        assert!(matches!(bash(&p, "git -C /work/repo push"), Verdict::Deny(_)));
         assert!(matches!(bash(&p, "ls -la src"), Verdict::Allow(_)));
         assert_eq!(bash(&p, "git branch -D main"), Verdict::Ask, "only --show-current is listed");
         assert_eq!(bash(&p, "mvn test"), Verdict::Ask);

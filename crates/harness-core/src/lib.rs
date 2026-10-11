@@ -6,11 +6,13 @@ pub mod claude;
 pub mod event;
 pub mod git;
 pub mod journal;
+pub mod ledger;
 pub mod policy;
 pub mod prompt;
 pub mod session;
 pub mod tasks;
 pub mod watch;
+pub mod watchdog;
 
 pub use claude::{BuildSummary, Mode, RunConfig, RunHandle, start_run};
 pub use session::{LoopConfig, Session, start_loop, start_single};

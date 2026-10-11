@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use tokio::sync::Notify;
@@ -13,8 +14,9 @@ use crate::claude::{BuildSummary, Mode, RunConfig, RunHandle, start_run};
 use crate::event::RunEvent;
 use crate::git;
 use crate::journal::{Journal, new_run_id};
-use crate::policy::Policy;
+use crate::policy::{Budget, Policy};
 use crate::tasks::{self, StatusKind};
+use crate::watchdog::{Action, Alarm, PriorUsage, Watchdog};
 
 type Sink = Arc<dyn Fn(RunEvent) + Send + Sync>;
 
@@ -24,6 +26,11 @@ struct SessionInner {
     cancelled: AtomicBool,
     finished: AtomicBool,
     cancel: Notify,
+    paused: AtomicBool,
+    resumed: Notify,
+    /// Unwatched sink, for events the session itself emits (pause, resume, alarms).
+    sink: Mutex<Option<Sink>>,
+    watchdog: Mutex<Option<Watchdog>>,
 }
 
 #[derive(Clone, Default)]
@@ -43,9 +50,104 @@ impl Session {
     pub fn stop(&self) {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         self.inner.cancel.notify_waiters();
+        self.inner.resumed.notify_waiters();
         if let Some(h) = self.current() {
             h.stop();
         }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.inner.paused.load(Ordering::SeqCst)
+    }
+
+    /// Freeze the running agent; a loop also holds before its next phase.
+    pub fn pause(&self, reason: &str) {
+        if self.inner.paused.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(h) = self.current()
+            && let Err(e) = h.pause()
+        {
+            self.emit(RunEvent::Error { message: format!("{e:#}") });
+        }
+        if let Some(w) = self.inner.watchdog.lock().unwrap().as_mut() {
+            w.set_paused(true, Instant::now());
+        }
+        self.emit(RunEvent::Paused { reason: reason.to_string() });
+    }
+
+    pub fn resume(&self) {
+        if !self.inner.paused.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(h) = self.current() {
+            let _ = h.resume();
+        }
+        if let Some(w) = self.inner.watchdog.lock().unwrap().as_mut() {
+            w.set_paused(false, Instant::now());
+        }
+        self.inner.resumed.notify_waiters();
+        self.emit(RunEvent::Resumed);
+    }
+
+    async fn wait_if_paused(&self) {
+        while self.is_paused() && !self.cancelled() {
+            let resumed = self.inner.resumed.notified();
+            tokio::pin!(resumed);
+            resumed.as_mut().enable();
+            if !self.is_paused() || self.cancelled() {
+                break;
+            }
+            resumed.await;
+        }
+    }
+
+    fn emit(&self, e: RunEvent) {
+        let sink = self.inner.sink.lock().unwrap().clone();
+        if let Some(sink) = sink {
+            sink(e);
+        }
+    }
+
+    fn remaining_usd(&self) -> Option<f64> {
+        self.inner.watchdog.lock().unwrap().as_ref().and_then(Watchdog::remaining_usd)
+    }
+
+    fn apply(&self, alarms: Vec<Alarm>) {
+        for a in alarms {
+            self.emit(RunEvent::Alarm { alarm: a.kind.clone(), message: a.message.clone(), action: a.action.as_str().into() });
+            match a.action {
+                Action::Warn => {}
+                Action::Pause => self.pause(&a.message),
+                Action::Stop => {
+                    self.emit(RunEvent::Error { message: format!("Stopped by the watchdog: {}", a.message) });
+                    self.stop();
+                }
+            }
+        }
+    }
+
+    /// Route events through the watchdog and start its clock. Returns the sink agents should use.
+    fn watch(&self, sink: Sink, budget: Budget, prior: PriorUsage) -> Sink {
+        self.inner.sink.lock().unwrap().replace(sink.clone());
+        self.inner.watchdog.lock().unwrap().replace(Watchdog::new(budget, prior, Instant::now()));
+        let s = self.clone();
+        tokio::spawn(async move {
+            while !s.is_finished() {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let running = s.current().is_some();
+                let alarms = s.inner.watchdog.lock().unwrap().as_mut().map(|w| w.tick(Instant::now(), running)).unwrap_or_default();
+                if !s.is_finished() {
+                    s.apply(alarms);
+                }
+            }
+        });
+        let s = self.clone();
+        Arc::new(move |e: RunEvent| {
+            let alarms = s.inner.watchdog.lock().unwrap().as_mut().map(|w| w.observe(&e, Instant::now())).unwrap_or_default();
+            sink(e);
+            s.apply(alarms);
+        })
     }
 
     pub fn is_finished(&self) -> bool {
@@ -71,7 +173,13 @@ pub async fn start_single<F>(cfg: RunConfig, sink: F) -> anyhow::Result<Session>
 where
     F: Fn(RunEvent) + Send + Sync + 'static,
 {
-    let sink: Sink = Arc::new(sink);
+    let session = Session::default();
+    let budget = Policy::load(&cfg.repo).map(|p| p.budget).unwrap_or_default();
+    let sink = session.watch(Arc::new(sink), budget, cfg.prior);
+    let mut cfg = cfg;
+    if cfg.max_budget_usd.is_none() {
+        cfg.max_budget_usd = session.remaining_usd();
+    }
     let label = match cfg.mode {
         Mode::Analyze { .. } => "Analysis",
         Mode::Refine => "Refine",
@@ -79,8 +187,13 @@ where
         Mode::Review { .. } => "Review",
     };
     let s2 = sink.clone();
-    let handle = start_run(cfg, move |e| s2(e)).await?;
-    let session = Session::default();
+    let handle = match start_run(cfg, move |e| s2(e)).await {
+        Ok(h) => h,
+        Err(e) => {
+            session.inner.finished.store(true, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
     session.inner.current.lock().unwrap().replace(handle.clone());
     let s = session.clone();
     tokio::spawn(async move {
@@ -97,18 +210,28 @@ pub struct LoopConfig {
     pub model: Option<String>,
     pub claude_bin: String,
     pub guard_bin: Option<PathBuf>,
+    /// Usage of this task before the loop (from the ledger), for budgets.
+    pub prior: PriorUsage,
 }
 
 impl LoopConfig {
     pub fn new(repo: impl Into<PathBuf>, slug: impl Into<String>) -> Self {
-        Self { repo: repo.into(), slug: slug.into(), model: None, claude_bin: "claude".into(), guard_bin: None }
+        Self {
+            repo: repo.into(),
+            slug: slug.into(),
+            model: None,
+            claude_bin: "claude".into(),
+            guard_bin: None,
+            prior: PriorUsage::default(),
+        }
     }
 
-    fn agent(&self, repo: &std::path::Path, mode: Mode) -> RunConfig {
+    fn agent(&self, repo: &std::path::Path, mode: Mode, max_budget_usd: Option<f64>) -> RunConfig {
         let mut cfg = RunConfig::new(repo, &self.slug, mode);
         cfg.model = self.model.clone();
         cfg.claude_bin = self.claude_bin.clone();
         cfg.guard_bin = self.guard_bin.clone();
+        cfg.max_budget_usd = max_budget_usd;
         cfg
     }
 }
@@ -185,6 +308,7 @@ where
         })
     };
     let session = Session::default();
+    let sink = session.watch(sink, policy.budget.clone(), cfg.prior);
     let s = session.clone();
     let run_dir = journal.lock().unwrap().dir().to_path_buf();
     tokio::spawn(async move {
@@ -228,6 +352,7 @@ async fn run_loop(
     let mut last_build: Option<BuildOutcome> = None;
 
     loop {
+        session.wait_if_paused().await;
         if session.cancelled() {
             return Ok("Stopped by the human.".into());
         }
@@ -245,7 +370,7 @@ async fn run_loop(
 
                 let head_before = git::head(repo)?;
                 let mode = Mode::Implement { round, build_command: policy.build.command.clone() };
-                let ok = run_agent(session, cfg.agent(repo, mode), sink).await?;
+                let ok = run_agent(session, cfg.agent(repo, mode, session.remaining_usd()), sink).await?;
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }
@@ -256,6 +381,10 @@ async fn run_loop(
                     bail!("The implementer did not finish round {round}.");
                 }
 
+                session.wait_if_paused().await;
+                if session.cancelled() {
+                    return Ok("Stopped by the human.".into());
+                }
                 last_build = match &policy.build.command {
                     Some(command) => {
                         build::check_requires(&policy.build.requires)?;
@@ -297,7 +426,7 @@ async fn run_loop(
                     _ => None,
                 };
                 let mode = Mode::Review { round: review_round, diff_path, build };
-                let ok = run_agent(session, cfg.agent(repo, mode), sink).await?;
+                let ok = run_agent(session, cfg.agent(repo, mode, session.remaining_usd()), sink).await?;
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }

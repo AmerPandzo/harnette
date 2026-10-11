@@ -8,8 +8,10 @@ use harness_core::policy::{Policy, default_toml, policy_path};
 use harness_core::tasks::{self, StatusKind, TaskSummary};
 use harness_core::watch::{TaskWatcher, watch_tasks};
 use harness_core::git::{self, Checkpoint};
+use harness_core::ledger::{self, Entry, Summary};
+use harness_core::watchdog::PriorUsage;
 use harness_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Default)]
@@ -22,8 +24,60 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
+fn ledger_path(app: &AppHandle) -> PathBuf {
+    app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("harness")).join("usage.jsonl")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// What the sink needs to know about its session to book usage in the ledger.
+struct Ctx {
+    app: AppHandle,
+    repo: String,
+    slug: String,
+    role: Mutex<String>,
+}
+
+/// Canonical repo path plus this task's earlier usage, so budgets span runs.
+fn prior_usage(app: &AppHandle, repo: &std::path::Path, slug: &str) -> (String, PriorUsage) {
+    let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf()).display().to_string();
+    let (tokens, usd) = ledger::task_totals(&ledger::read(&ledger_path(app)), &repo, slug);
+    (repo, PriorUsage { tokens, usd })
+}
+
+fn session_sink(ctx: Ctx) -> impl Fn(RunEvent) + Send + Sync + 'static {
+    move |e: RunEvent| {
+        match &e {
+            RunEvent::Phase { role, .. } => *ctx.role.lock().unwrap() = role.clone(),
+            RunEvent::Finished { new_tokens, cost_usd, .. } => {
+                let entry = Entry {
+                    ts_ms: now_ms(),
+                    repo: ctx.repo.clone(),
+                    slug: ctx.slug.clone(),
+                    role: ctx.role.lock().unwrap().clone(),
+                    new_tokens: *new_tokens,
+                    usd: *cost_usd,
+                };
+                let _ = ledger::append(&ledger_path(&ctx.app), &entry);
+            }
+            _ => {}
+        }
+        on_event(&ctx.app, e);
+    }
+}
+
 fn on_event(app: &AppHandle, event: RunEvent) {
     match &event {
+        RunEvent::Alarm { message, action, .. } => {
+            let title = match action.as_str() {
+                "pause" => "Harness: paused",
+                "stop" => "Harness: stopped",
+                _ => "Harness: warning",
+            };
+            notify(app, title, message);
+        }
         RunEvent::PermissionAsk { tool, summary, .. } => notify(app, &format!("Harness: allow {tool}?"), summary),
         RunEvent::Build { ok: false, command, .. } => notify(app, "Harness: build is red", command),
         RunEvent::SessionEnded { ok, summary } => {
@@ -64,10 +118,14 @@ async fn start_run(
         "refine" => Mode::Refine,
         other => return Err(format!("unknown run mode {other:?}")),
     };
-    let mut cfg = RunConfig::new(expand_home(repo.trim()), slug.trim(), mode);
+    let repo = expand_home(repo.trim());
+    let slug = slug.trim().to_string();
+    let (repo_key, prior) = prior_usage(&app, &repo, &slug);
+    let mut cfg = RunConfig::new(repo, &slug, mode);
     cfg.model = model.filter(|m| !m.trim().is_empty());
-    let sink_app = app.clone();
-    let session = start_single(cfg, move |e| on_event(&sink_app, e)).await.map_err(err)?;
+    cfg.prior = prior;
+    let ctx = Ctx { app: app.clone(), repo: repo_key, slug, role: Mutex::new("analyst".into()) };
+    let session = start_single(cfg, session_sink(ctx)).await.map_err(err)?;
     state.run.lock().unwrap().replace(session);
     Ok(())
 }
@@ -88,10 +146,14 @@ async fn start_loop(
     if busy(&state) {
         return Err("A run is already in progress.".into());
     }
-    let mut cfg = LoopConfig::new(expand_home(repo.trim()), slug.trim());
+    let repo = expand_home(repo.trim());
+    let slug = slug.trim().to_string();
+    let (repo_key, prior) = prior_usage(&app, &repo, &slug);
+    let mut cfg = LoopConfig::new(repo, &slug);
     cfg.model = model.filter(|m| !m.trim().is_empty());
-    let sink_app = app.clone();
-    let session = start_core_loop(cfg, move |e| on_event(&sink_app, e)).await.map_err(err)?;
+    cfg.prior = prior;
+    let ctx = Ctx { app: app.clone(), repo: repo_key, slug, role: Mutex::new("implementer".into()) };
+    let session = start_core_loop(cfg, session_sink(ctx)).await.map_err(err)?;
     state.run.lock().unwrap().replace(session);
     Ok(())
 }
@@ -125,6 +187,26 @@ fn answer_permission(state: State<'_, AppState>, request_id: String, allow: bool
 async fn send_note(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let handle = state.run.lock().unwrap().clone().ok_or("No run in progress.")?;
     handle.note(&text).await.map_err(err)
+}
+
+#[tauri::command]
+fn pause_run(state: State<'_, AppState>) {
+    if let Some(s) = state.run.lock().unwrap().as_ref() {
+        s.pause("Paused by you.");
+    }
+}
+
+#[tauri::command]
+fn resume_run(state: State<'_, AppState>) {
+    if let Some(s) = state.run.lock().unwrap().as_ref() {
+        s.resume();
+    }
+}
+
+/// Rolling 24 h / 7 day usage across all repos, from the ledger.
+#[tauri::command]
+fn usage_summary(app: AppHandle) -> Summary {
+    ledger::summary(&ledger::read(&ledger_path(&app)), now_ms())
 }
 
 #[tauri::command]
@@ -206,6 +288,9 @@ pub fn run() {
             answer_permission,
             send_note,
             stop_run,
+            pause_run,
+            resume_run,
+            usage_summary,
             watch_repo,
             list_tasks,
             read_task,

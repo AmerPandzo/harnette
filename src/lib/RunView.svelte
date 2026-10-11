@@ -1,6 +1,6 @@
 <script lang="ts">
   import { remember, remembered } from "./types";
-  import { run, sendNote, startRun, stopRun } from "./run.svelte";
+  import { pauseRun, resumeRun, run, sendNote, startRun, stopRun } from "./run.svelte";
 
   let { repo }: { repo: string } = $props();
 
@@ -63,6 +63,11 @@
       <label class="grow">Ticket<textarea bind:value={ticket} placeholder="Paste the ticket text" required disabled={run.running}></textarea></label>
       <div class="actions">
         <button type="submit" class="primary" disabled={run.running || !repo}>Analyze</button>
+        {#if run.paused}
+          <button type="button" onclick={resumeRun}>Resume</button>
+        {:else}
+          <button type="button" onclick={pauseRun} disabled={!run.running}>Pause</button>
+        {/if}
         <button type="button" onclick={stopRun} disabled={!run.running}>Stop</button>
       </div>
       {#if run.error}<p class="error">{run.error}</p>{/if}
@@ -118,6 +123,12 @@
           </details>
         {:else if e.kind === "status_changed"}
           <div class="ev sys">Status → <b>{e.to}</b> by {e.by}{e.reason ? `: ${e.reason}` : ""}</div>
+        {:else if e.kind === "alarm"}
+          <div class="ev alarm" class:stop={e.action !== "warn"}>⚠ {e.message}{e.action !== "warn" ? ` → ${e.action}` : ""}</div>
+        {:else if e.kind === "paused"}
+          <div class="ev sys">Paused: {e.reason}</div>
+        {:else if e.kind === "resumed"}
+          <div class="ev sys">Resumed</div>
         {:else if e.kind === "session_ended"}
           <div class="ended" class:err={!e.ok}>{e.ok ? "✓" : "■"} {e.summary}</div>
         {/if}
@@ -251,6 +262,13 @@
   }
   b.no {
     color: var(--bad);
+  }
+  .ev.alarm {
+    border-color: #d99a2b;
+    background: var(--warn-bg);
+  }
+  .ev.alarm.stop {
+    border-color: var(--bad);
   }
   .ended {
     padding: 8px 10px;

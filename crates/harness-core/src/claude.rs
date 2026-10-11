@@ -18,6 +18,7 @@ use crate::event::{Parsed, RunEvent, parse_line, summarize_tool};
 use crate::journal::{Journal, new_run_id};
 use crate::policy::{Policy, Role, Verdict};
 use crate::prompt;
+use crate::watchdog::PriorUsage;
 use crate::tasks;
 
 /// What the run is for; picks the prompt.
@@ -61,6 +62,10 @@ pub struct RunConfig {
     pub claude_bin: String,
     /// Path to `harness-guard`; found next to the running executable when unset.
     pub guard_bin: Option<PathBuf>,
+    /// Hard dollar cap the CLI enforces for this run (`--max-budget-usd`).
+    pub max_budget_usd: Option<f64>,
+    /// Usage of this task before this run (from the ledger), for the watchdog's budgets.
+    pub prior: PriorUsage,
 }
 
 impl RunConfig {
@@ -73,6 +78,8 @@ impl RunConfig {
             ask_timeout: None,
             claude_bin: "claude".into(),
             guard_bin: None,
+            max_budget_usd: None,
+            prior: PriorUsage::default(),
         }
     }
 }
@@ -81,6 +88,7 @@ type Emit = Arc<dyn Fn(RunEvent) + Send + Sync>;
 
 struct Inner {
     run_id: String,
+    pid: Option<u32>,
     stdin: AsyncMutex<Option<ChildStdin>>,
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     kill: Mutex<Option<oneshot::Sender<()>>>,
@@ -134,11 +142,35 @@ impl RunHandle {
         }
     }
 
+    /// Freeze the agent process (SIGSTOP); a command it already started keeps running.
+    pub fn pause(&self) -> anyhow::Result<()> {
+        signal(self.inner.pid, "STOP")
+    }
+
+    pub fn resume(&self) -> anyhow::Result<()> {
+        signal(self.inner.pid, "CONT")
+    }
+
     pub fn stop(&self) {
         if let Some(kill) = self.inner.kill.lock().unwrap().take() {
             let _ = kill.send(());
         }
     }
+}
+
+#[cfg(unix)]
+fn signal(pid: Option<u32>, sig: &str) -> anyhow::Result<()> {
+    let pid = pid.context("agent process id unknown")?;
+    let ok = std::process::Command::new("kill").arg(format!("-{sig}")).arg(pid.to_string()).status()?.success();
+    if !ok {
+        bail!("could not send SIG{sig} to the agent");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn signal(_pid: Option<u32>, _sig: &str) -> anyhow::Result<()> {
+    bail!("pausing an agent is not supported on this platform yet")
 }
 
 async fn write_line(inner: &Inner, value: &Value) -> anyhow::Result<()> {
@@ -244,6 +276,9 @@ where
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
     }
+    if let Some(usd) = cfg.max_budget_usd {
+        cmd.args(["--max-budget-usd", &format!("{usd:.2}")]);
+    }
     let mut child = cmd
         .current_dir(&repo)
         .stdin(Stdio::piped())
@@ -256,6 +291,7 @@ where
     let (kill_tx, kill_rx) = oneshot::channel();
     let inner = Arc::new(Inner {
         run_id: run_id.clone(),
+        pid: child.id(),
         stdin: AsyncMutex::new(child.stdin.take()),
         pending: Mutex::new(HashMap::new()),
         kill: Mutex::new(Some(kill_tx)),
@@ -299,11 +335,18 @@ where
         let policy = policy.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
+            // The CLI repeats a message's usage once per content block; report it once.
+            let mut usage_seen = std::collections::HashSet::new();
             while let Ok(Some(line)) = lines.next_line().await {
                 journal.lock().unwrap().raw(&line);
                 match parse_line(&line) {
                     Parsed::Events(events) => {
                         for e in events {
+                            if let RunEvent::Usage { message_id, .. } = &e
+                                && !usage_seen.insert(message_id.clone())
+                            {
+                                continue;
+                            }
                             let finished = matches!(e, RunEvent::Finished { .. });
                             if let RunEvent::Finished { ok: true, .. } = e {
                                 inner.succeeded.store(true, Ordering::SeqCst);

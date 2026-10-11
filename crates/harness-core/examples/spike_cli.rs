@@ -5,6 +5,7 @@
 //! While it runs, type on stdin:
 //!   y / n          answer the oldest open permission request
 //!   note <text>    send a steering note
+//!   pause / resume freeze or continue the agent
 //!   stop           kill the run
 
 use std::collections::VecDeque;
@@ -74,11 +75,13 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     "stop" => handle.stop(),
+                    "pause" => handle.pause("paused from the terminal"),
+                    "resume" => handle.resume(),
                     _ if line.starts_with("note ") => {
                         if let Err(err) = handle.note(&line[5..]).await { eprintln!("note failed: {err}"); }
                     }
                     "" => {}
-                    _ => eprintln!("commands: y | n | note <text> | stop"),
+                    _ => eprintln!("commands: y | n | note <text> | pause | resume | stop"),
                 }
             }
         }

@@ -4,11 +4,12 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import Board from "$lib/Board.svelte";
+  import MaintenanceView from "$lib/MaintenanceView.svelte";
   import PolicyView from "$lib/PolicyView.svelte";
   import RunView from "$lib/RunView.svelte";
   import TaskDetail from "$lib/TaskDetail.svelte";
-  import { answer, initRunEvents, onRunExit, run, startLoop, startRun } from "$lib/run.svelte";
-  import { remember, remembered, type TaskSummary } from "$lib/types";
+  import { answer, initRunEvents, onRunExit, resumeRun, run, startLoop, startRun, stopRun } from "$lib/run.svelte";
+  import { fmtTokens, remember, remembered, type TaskSummary } from "$lib/types";
 
   let repoInput = $state(remembered("harness.repo", ""));
   let repo = $state(""); // the watched, resolved repo
@@ -16,7 +17,7 @@
   let tasks = $state<TaskSummary[]>([]);
   let selected = $state<string | null>(null);
   let version = $state(0);
-  let tab = $state<"board" | "run" | "policy">("board");
+  let tab = $state<"board" | "run" | "policy" | "maintenance">("board");
   let recent = $state<string[]>(JSON.parse(remembered("harness.recentRepos", "[]")));
   const repoName = (p: string) => p.split("/").filter(Boolean).at(-1) ?? p;
 
@@ -117,6 +118,9 @@
         Run{#if run.running}<span class="dot" title="Running"></span>{/if}
       </button>
       <button class:on={tab === "policy"} onclick={() => (tab = "policy")} disabled={!repo}>Policy</button>
+      <button class:on={tab === "maintenance"} onclick={() => (tab = "maintenance")}>
+        Maintenance{#if run.alarms.length}<span class="dot warn" title="Alarms"></span>{/if}
+      </button>
     </nav>
     <div class="status">
       {#if run.quota}
@@ -129,13 +133,32 @@
           {pct(run.quota.seven_day)}
         </span>
       {/if}
-      {#if run.finished}
+      {#if run.running}
+        <span class="meta" title="This session: new tokens · cost of finished agent runs">
+          {run.slug} · {fmtTokens(run.tokens)} tok · ${run.usd.toFixed(3)}
+        </span>
+      {:else if run.finished}
         <span class="meta" title="Last run">${run.finished.cost_usd.toFixed(4)} · {(run.finished.duration_ms / 1000).toFixed(0)}s</span>
       {/if}
     </div>
   </header>
 
   {#if repoError}<p class="error banner">{repoError}</p>{/if}
+
+  {#if run.paused}
+    <div class="ask paused">
+      <div><b>{run.slug} is paused.</b> {run.paused}</div>
+      <div class="ask-actions">
+        <button class="deny" onclick={stopRun}>Stop</button>
+        <button class="primary" onclick={resumeRun}>Resume</button>
+      </div>
+    </div>
+  {:else if run.warning}
+    <div class="ask warnbar">
+      <div>⚠ {run.warning}</div>
+      <div class="ask-actions"><button onclick={() => (run.warning = null)}>Dismiss</button></div>
+    </div>
+  {/if}
 
   {#each run.asks as a (a.request_id)}
     <div class="ask">
@@ -173,6 +196,8 @@
       {/if}
     {:else if tab === "policy"}
       <PolicyView {repo} />
+    {:else if tab === "maintenance"}
+      <MaintenanceView />
     {:else}
       <RunView {repo} />
     {/if}
@@ -230,6 +255,15 @@
     border-radius: 50%;
     background: var(--accent);
     vertical-align: middle;
+  }
+  .dot.warn {
+    background: #d99a2b;
+  }
+  .ask.paused {
+    border-color: var(--bad);
+  }
+  .ask.warnbar {
+    border-color: #d99a2b;
   }
   .status {
     display: flex;
