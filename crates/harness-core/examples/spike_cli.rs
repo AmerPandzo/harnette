@@ -70,11 +70,16 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("session started");
 
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+    let mut stdin_open = true;
     loop {
         tokio::select! {
             _ = done_rx.recv() => break,
-            line = stdin.next_line() => {
-                let Ok(Some(line)) = line else { continue };
+            line = stdin.next_line(), if stdin_open => {
+                let Ok(Some(line)) = line else {
+                    // stdin closed: keep running unattended until the session ends.
+                    stdin_open = false;
+                    continue;
+                };
                 let line = line.trim();
                 match line {
                     "y" | "n" => {
@@ -96,6 +101,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // process::exit skips kill_on_drop: make sure no agent outlives the CLI.
+    handle.shutdown();
     // Tokio's stdin reader blocks runtime shutdown until the next line, so exit explicitly.
     std::process::exit(0)
 }

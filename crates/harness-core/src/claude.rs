@@ -157,6 +157,14 @@ impl Handle {
         signal(self.inner.pid, "CONT")
     }
 
+    /// Kill the agent process right now (SIGKILL works on a paused process too). For app shutdown,
+    /// when there is no time for the normal stop path.
+    pub fn kill_now(&self) {
+        if !self.is_finished() {
+            let _ = signal(self.inner.pid, "KILL");
+        }
+    }
+
     pub fn stop(&self) {
         if let Some(kill) = self.inner.kill.lock().unwrap().take() {
             let _ = kill.send(());

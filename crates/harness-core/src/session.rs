@@ -59,6 +59,15 @@ impl Session {
         }
     }
 
+    /// The app is quitting: cancel the session and kill the agent synchronously, so no agent
+    /// (running or paused) outlives Harness.
+    pub fn shutdown(&self) {
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        if let Some(h) = self.current() {
+            h.kill_now();
+        }
+    }
+
     pub fn is_paused(&self) -> bool {
         self.inner.paused.load(Ordering::SeqCst)
     }

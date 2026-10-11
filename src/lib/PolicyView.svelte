@@ -1,5 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import PolicyForm from "./PolicyForm.svelte";
+  import { remember, remembered } from "./types";
 
   let { repo }: { repo: string } = $props();
 
@@ -10,9 +12,17 @@
   let message = $state("");
 
   let dirty = $derived(text !== saved);
+  let mode = $state<"screen" | "toml">(remembered("harness.policyMode", "screen") === "toml" ? "toml" : "screen");
+
+  function setMode(m: "screen" | "toml") {
+    if (dirty && !confirm("Discard unsaved TOML changes?")) return;
+    mode = m;
+    remember("harness.policyMode", m);
+  }
 
   $effect(() => {
     const r = repo;
+    void mode; // re-read when switching, so both views show the file as saved
     invoke<[string, boolean]>("read_policy", { repo: r })
       .then(([t, e]) => {
         text = saved = t;
@@ -37,6 +47,18 @@
 </script>
 
 <div class="policy">
+  <div class="tabs">
+    <span class="seg">
+      <button class:on={mode === "screen"} onclick={() => setMode("screen")}>Screen</button>
+      <button class:on={mode === "toml"} onclick={() => setMode("toml")}>TOML</button>
+    </span>
+    <span class="meta">
+      <code>.ai-tasks/policy.toml</code> · every agent tool call is checked against it; agents cannot edit it.
+    </span>
+  </div>
+  {#if mode === "screen"}
+    <PolicyForm {repo} onsaved={() => {}} />
+  {:else}
   <div class="bar">
     <div>
       <b>.ai-tasks/policy.toml</b>
@@ -55,9 +77,32 @@
   <p class="hint pad">
     Every tool call an agent makes is checked against this file by <code>harness-guard</code>. Agents cannot edit it.
   </p>
+  {/if}
 </div>
 
 <style>
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .seg button {
+    border: none;
+    border-radius: 0;
+    padding: 3px 12px;
+    font-size: 12px;
+  }
+  .seg button.on {
+    background: var(--accent-soft);
+  }
   .policy {
     display: flex;
     flex-direction: column;

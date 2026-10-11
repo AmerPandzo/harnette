@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Scripted ACP agent standing in for `copilot --acp` in tests.
-A first prompt containing SCENARIO:quota answers like an exhausted Copilot plan; anything else does work."""
+A first prompt containing SCENARIO:quota answers like an exhausted Copilot plan, SCENARIO:hang never
+answers; anything else does work."""
 import json, os, sys
 
 scenario = "work"
@@ -70,6 +71,9 @@ while True:
         text = m["params"]["prompt"][0]["text"]
         if prompts == 1 and "SCENARIO:quota" in text:
             scenario = "quota"
+        if prompts == 1 and "SCENARIO:hang" in text:
+            say("thinking forever")
+            continue  # never answers the prompt
         if scenario == "quota":
             say("Error: You have exceeded your monthly quota (Request ID: TEST)")
         elif prompts == 1:

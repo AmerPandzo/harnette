@@ -56,6 +56,10 @@ impl RunHandle {
         each!(self, h => h.stop())
     }
 
+    pub fn kill_now(&self) {
+        each!(self, h => h.kill_now())
+    }
+
     /// The worker ran out of plan quota (the run did not do the task).
     pub fn quota_exhausted(&self) -> bool {
         match self {

@@ -46,7 +46,7 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
     Allow,
@@ -54,7 +54,7 @@ pub enum Access {
     Deny,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnQuota {
     Ask,
@@ -62,21 +62,21 @@ pub enum OnQuota {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EditScope {
     Task,
     Repo,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnOutOfScope {
     Warn,
     Block,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnBreach {
     Warn,
@@ -84,7 +84,7 @@ pub enum OnBreach {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryMode {
     None,
@@ -93,14 +93,14 @@ pub enum DeliveryMode {
     Pr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Approval {
     Ask,
     Auto,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Roles {
     pub analyst: String,
@@ -181,7 +181,7 @@ impl Default for Roles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Git {
     pub deny: Vec<String>,
@@ -194,7 +194,7 @@ impl Default for Git {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Shell {
     /// Command prefixes, matched word by word: `git diff` allows `git diff --stat`.
@@ -215,7 +215,7 @@ impl Default for Shell {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Read {
     pub outside_repo: Access,
@@ -227,7 +227,7 @@ impl Default for Read {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Edits {
     pub scope: EditScope,
@@ -240,7 +240,7 @@ impl Default for Edits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Web {
     pub access: Access,
@@ -252,7 +252,7 @@ impl Default for Web {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Budget {
     /// New tokens (input + cache writes + output) across all runs of a task; cache reads are not counted.
@@ -270,14 +270,14 @@ impl Default for Budget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Build {
     pub command: Option<String>,
     pub requires: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RunLimits {
     pub max_rounds: u32,
@@ -289,7 +289,7 @@ impl Default for RunLimits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Delivery {
     pub mode: DeliveryMode,
@@ -311,7 +311,7 @@ impl Default for Delivery {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
     pub roles: Roles,
@@ -328,7 +328,7 @@ pub struct Policy {
 }
 
 /// How Harness runs Copilot CLI.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CopilotCfg {
     /// Model for roles that say just "copilot" (Copilot's own default may be a small model).
@@ -415,7 +415,7 @@ excluded_tools = ["task", "run_dynamic_workflow", "dynamic_workflows_manage"]   
 }
 
 /// What the repository is built and tested with, guessed from its files.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct Detected {
     pub command: &'static str,
     /// Shell prefix the agents need to run it.
@@ -468,6 +468,75 @@ pub fn suggested_toml(repo: &Path) -> String {
         1,
     )
     .replacen("\"git branch --show-current\"]", &format!("\"git branch --show-current\", \"{}\"]", d.allow), 1)
+}
+
+/// Write form values (a JSON object shaped like `Policy`) into the policy text. Only keys whose value
+/// changed are touched, so comments and layout survive; `null` removes a key (back to its default).
+pub fn apply_values(text: &str, values: &Value) -> anyhow::Result<String> {
+    use toml_edit::{DocumentMut, Item, Table};
+    let mut doc: DocumentMut = text.parse().context("policy.toml is not valid TOML")?;
+    let sections = values.as_object().context("values must be an object")?;
+    for (section, fields) in sections {
+        let Some(fields) = fields.as_object() else { continue };
+        if !doc.contains_key(section) {
+            doc.insert(section, Item::Table(Table::new()));
+        }
+        let table = doc[section.as_str()].as_table_mut().with_context(|| format!("[{section}] is not a table"))?;
+        for (key, v) in fields {
+            if v.is_null() {
+                table.remove(key);
+                continue;
+            }
+            let new = to_toml_value(key, v)?;
+            match table.get_mut(key).and_then(Item::as_value_mut) {
+                Some(old) if toml_eq(old, &new) => {}
+                Some(old) => {
+                    let decor = old.decor().clone();
+                    *old = new;
+                    *old.decor_mut() = decor;
+                }
+                None => {
+                    table.insert(key, Item::Value(new));
+                }
+            }
+        }
+    }
+    let out = doc.to_string();
+    Policy::from_toml(&out)?;
+    Ok(out)
+}
+
+fn to_toml_value(key: &str, v: &Value) -> anyhow::Result<toml_edit::Value> {
+    Ok(match v {
+        Value::Bool(b) => (*b).into(),
+        // Dollar amounts are floats even when the form sends a whole number.
+        Value::Number(n) if key == "usd_per_task" => n.as_f64().unwrap_or_default().into(),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => i.into(),
+            None => n.as_f64().unwrap_or_default().into(),
+        },
+        Value::String(s) => s.as_str().into(),
+        Value::Array(items) => {
+            let mut arr = toml_edit::Array::new();
+            for i in items {
+                arr.push(to_toml_value(key, i)?);
+            }
+            toml_edit::Value::Array(arr)
+        }
+        other => anyhow::bail!("unsupported value for {key}: {other}"),
+    })
+}
+
+fn toml_eq(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+    use toml_edit::Value as V;
+    match (a, b) {
+        (V::String(x), V::String(y)) => x.value() == y.value(),
+        (V::Integer(x), V::Integer(y)) => x.value() == y.value(),
+        (V::Float(x), V::Float(y)) => x.value() == y.value(),
+        (V::Boolean(x), V::Boolean(y)) => x.value() == y.value(),
+        (V::Array(x), V::Array(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| toml_eq(a, b)),
+        _ => false,
+    }
 }
 
 impl Policy {
@@ -731,6 +800,29 @@ mod tests {
         std::fs::write(dir.join("mvnw"), "").unwrap();
         assert_eq!(detect_build(&dir).unwrap().command, "./mvnw -B verify");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn form_values_keep_comments_and_touch_only_changes() {
+        let values = json!({
+            "shell": { "unlisted": "deny", "allow": Policy::default().shell.allow, "ask_timeout_min": 30 },
+            "budget": { "usd_per_task": 5, "tokens_per_task": null },
+            "build": { "command": "mvn -B verify" },
+        });
+        let out = apply_values(default_toml(), &values).unwrap();
+        let p = Policy::from_toml(&out).unwrap();
+        assert_eq!(p.shell.unlisted, Access::Deny);
+        assert_eq!(p.shell.ask_timeout_min, 30);
+        assert_eq!(p.budget.usd_per_task, Some(5.0));
+        assert_eq!(p.build.command.as_deref(), Some("mvn -B verify"));
+        assert!(out.contains(r#"unlisted = "deny"              # "ask" | "deny" | "allow""#), "comment kept:\n{out}");
+        // The unchanged multi-line allow list keeps its layout.
+        assert!(out.contains("allow = [\"ls\", \"pwd\""));
+        assert!(out.contains("         \"git status\""));
+        // A form that changes nothing changes nothing.
+        let same = serde_json::to_value(Policy::default()).unwrap();
+        assert_eq!(apply_values(default_toml(), &same).unwrap(), default_toml());
+        assert!(apply_values(default_toml(), &json!({ "roles": { "implementer": "gpt" } })).is_err());
     }
 
     #[test]

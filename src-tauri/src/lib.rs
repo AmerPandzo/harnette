@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use harness_core::policy::{Policy, policy_path, suggested_toml};
+use harness_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
 use harness_core::review::{Criterion, Finding, parse_criteria, parse_findings};
 use harness_core::tasks::{self, StatusKind, TaskSummary};
 use harness_core::watch::{TaskWatcher, watch_tasks};
@@ -362,6 +362,31 @@ fn save_policy(repo: String, text: String) -> Result<(), String> {
     std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
+#[derive(serde::Serialize)]
+struct PolicyForm {
+    values: Policy,
+    defaults: Policy,
+    detected: Option<Detected>,
+    exists: bool,
+}
+
+/// The policy as form values (file or, when there is none, the detected template).
+#[tauri::command]
+fn policy_form(repo: String) -> Result<PolicyForm, String> {
+    let path = expand_home(&repo);
+    let (text, exists) = read_policy(repo)?;
+    Ok(PolicyForm { values: Policy::from_toml(&text).map_err(err)?, defaults: Policy::default(), detected: detect_build(&path), exists })
+}
+
+/// Save form values into the policy file, keeping its comments. Returns the new text.
+#[tauri::command]
+fn save_policy_values(repo: String, values: serde_json::Value) -> Result<String, String> {
+    let (text, _) = read_policy(repo.clone())?;
+    let out = apply_values(&text, &values).map_err(err)?;
+    save_policy(repo, out.clone())?;
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -389,8 +414,18 @@ pub fn run() {
             write_task,
             set_task_status,
             read_policy,
-            save_policy
+            save_policy,
+            policy_form,
+            save_policy_values
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Quitting must not leave an agent running (or frozen by Pause) behind.
+            if let tauri::RunEvent::Exit = event
+                && let Some(session) = app.state::<AppState>().run.lock().unwrap().as_ref()
+            {
+                session.shutdown();
+            }
+        });
 }

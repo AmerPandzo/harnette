@@ -11,6 +11,7 @@ serde_json = "1"
 notify = "8"
 toml = "0.9"
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
+toml_edit = "0.23"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "io-std"] }
