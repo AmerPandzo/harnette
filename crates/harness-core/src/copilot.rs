@@ -301,10 +301,28 @@ async fn on_permission(inner: Arc<Inner>, policy: &Policy, role: Role, repo: &Pa
     }
 }
 
+/// The user's Copilot instructions file, if configured and present (`~` expanded).
+fn standing_instructions(path: &str) -> Option<(String, String)> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let full = match path.strip_prefix("~/") {
+        Some(rest) => std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => std::path::PathBuf::from(path),
+    };
+    let text = std::fs::read_to_string(full).ok()?;
+    Some((path.to_string(), text.trim().to_string())).filter(|(_, t)| !t.is_empty())
+}
+
 pub fn args(cfg: &RunConfig, policy: &Policy) -> Vec<String> {
     let mut args: Vec<String> = ["--acp", "--no-auto-update", "--no-ask-user", "--disallow-temp-dir"].map(String::from).to_vec();
-    if let Some(model) = &cfg.model {
-        args.extend(["--model".into(), model.clone()]);
+    let model = cfg.model.clone().or_else(|| Some(policy.copilot.model.clone()).filter(|m| !m.is_empty()));
+    if let Some(model) = model {
+        args.extend(["--model".into(), model]);
+    }
+    for tool in &policy.copilot.excluded_tools {
+        args.extend(["--excluded-tools".into(), tool.clone()]);
     }
     // Denied even if Copilot would not ask (its own allow rules or auto-approved commands).
     for verb in &policy.git.deny {
@@ -416,7 +434,10 @@ where
         })
     };
 
-    let prompt = prompt_text(&cfg);
+    let mut prompt = prompt_text(&cfg);
+    if let Some((path, rules)) = standing_instructions(&policy.copilot.instructions) {
+        prompt.push_str(&format!("\n\n## Standing instructions (from {path})\n\n{rules}\n"));
+    }
     journal.lock().unwrap().raw(&json!({ "harness_prompt": prompt }).to_string());
     let driver = {
         let inner = inner.clone();
@@ -631,6 +652,8 @@ mod tests {
         let cfg = RunConfig::new("/tmp", "x", crate::claude::Mode::Refine);
         let a = args(&cfg, &Policy::default()).join(" ");
         assert!(a.contains("--deny-tool shell(git push)"));
+        assert!(a.contains("--model claude-sonnet-5"), "policy default when the role names no model");
+        assert!(a.contains("--excluded-tools task"));
         assert!(a.starts_with("--acp"));
         assert!(!a.contains("allow-all") && !a.contains("yolo"));
     }

@@ -76,10 +76,10 @@
     }
   }
 
-  async function runTask() {
+  async function runTask(base = "") {
     if (!selectedTask) return;
     try {
-      await startLoop({ repo, slug: selectedTask.slug, model: remembered("harness.model", "") });
+      await startLoop({ repo, slug: selectedTask.slug, model: remembered("harness.model", ""), base });
     } catch {}
     tab = "run";
   }

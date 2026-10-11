@@ -110,9 +110,9 @@ export async function startRun(args: { repo: string; slug: string; mode: "analyz
   await guarded(() => invoke("start_run", { ...args, ticket: args.ticket ?? null, model: args.model || null }));
 }
 
-export async function startLoop(args: { repo: string; slug: string; model?: string }) {
+export async function startLoop(args: { repo: string; slug: string; model?: string; base?: string }) {
   begin(args.slug, "loop");
-  await guarded(() => invoke("start_loop", { ...args, model: args.model || null }));
+  await guarded(() => invoke("start_loop", { ...args, model: args.model || null, base: args.base || null }));
 }
 
 export const answer = (a: Ask, allow: boolean) => invoke("answer_permission", { requestId: a.request_id, allow });

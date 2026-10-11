@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use harness_core::policy::{Policy, default_toml, policy_path};
+use harness_core::policy::{Policy, policy_path, suggested_toml};
 use harness_core::review::{Criterion, Finding, parse_criteria, parse_findings};
 use harness_core::tasks::{self, StatusKind, TaskSummary};
 use harness_core::watch::{TaskWatcher, watch_tasks};
@@ -148,6 +148,7 @@ async fn start_loop(
     repo: String,
     slug: String,
     model: Option<String>,
+    base: Option<String>,
 ) -> Result<(), String> {
     if busy(&state) {
         return Err("A run is already in progress.".into());
@@ -157,6 +158,7 @@ async fn start_loop(
     let (repo_key, prior) = prior_usage(&app, &repo, &slug);
     let mut cfg = LoopConfig::new(repo, &slug);
     cfg.model = model.filter(|m| !m.trim().is_empty());
+    cfg.base = base.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
     cfg.prior = prior;
     let ctx = Ctx { app: app.clone(), repo: repo_key, slug, role: Mutex::new("implementer".into()) };
     let session = start_core_loop(cfg, session_sink(ctx)).await.map_err(err)?;
@@ -343,7 +345,8 @@ fn read_policy(repo: String) -> Result<(String, bool), String> {
     let path = policy_path(&expand_home(&repo));
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok((text, true)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((default_toml().to_string(), false)),
+        // No policy yet: the template, with the build command guessed from the repo's files.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((suggested_toml(&expand_home(&repo)), false)),
         Err(e) => Err(format!("reading {}: {e}", path.display())),
     }
 }

@@ -19,9 +19,10 @@ use tokio::sync::mpsc;
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [repo, slug, ticket_file, rest @ ..] = args.as_slice() else {
-        anyhow::bail!("usage: spike_cli <repo> <slug> <ticket-file | --refine | --loop | --deliver> [model]");
+        anyhow::bail!("usage: spike_cli <repo> <slug> <ticket-file | --refine | --loop | --deliver> [model] [--base=REF]");
     };
-    let model = rest.first().cloned();
+    let base = rest.iter().find_map(|a| a.strip_prefix("--base=")).map(String::from);
+    let model = rest.iter().find(|a| !a.starts_with("--")).cloned();
     if ticket_file == "--deliver" {
         let repo = std::path::Path::new(repo);
         let policy = harness_core::policy::Policy::load(repo)?;
@@ -53,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         "--loop" => {
             let mut cfg = LoopConfig::new(repo, slug);
             cfg.model = model;
+            cfg.base = base;
             start_loop(cfg, sink).await?
         }
         other => {

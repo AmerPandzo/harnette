@@ -324,6 +324,30 @@ pub struct Policy {
     pub build: Build,
     pub run: RunLimits,
     pub delivery: Delivery,
+    pub copilot: CopilotCfg,
+}
+
+/// How Harness runs Copilot CLI.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CopilotCfg {
+    /// Model for roles that say just "copilot" (Copilot's own default may be a small model).
+    pub model: String,
+    /// Copilot CLI does not read IntelliJ's global instructions; this file is appended to every
+    /// Copilot prompt when it exists. Empty = none.
+    pub instructions: String,
+    /// Tools hidden from Copilot (sub-agents would bypass the turn-level view Harness has).
+    pub excluded_tools: Vec<String>,
+}
+
+impl Default for CopilotCfg {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-5".into(),
+            instructions: "~/.config/github-copilot/intellij/global-copilot-instructions.md".into(),
+            excluded_tools: ["task", "run_dynamic_workflow", "dynamic_workflows_manage"].map(String::from).to_vec(),
+        }
+    }
 }
 
 pub fn policy_path(repo: &Path) -> PathBuf {
@@ -382,7 +406,68 @@ approval = "ask"              # "ask" | "auto"
 branch = "ai/{slug}"
 protected = ["main", "master", "develop", "release/*"]
 force_push = false
+
+[copilot]                     # when a role is "copilot"
+model = "claude-sonnet-5"     # for roles that say just "copilot"
+instructions = "~/.config/github-copilot/intellij/global-copilot-instructions.md"  # appended to Copilot prompts if it exists
+excluded_tools = ["task", "run_dynamic_workflow", "dynamic_workflows_manage"]   # no sub-agents
 "#
+}
+
+/// What the repository is built and tested with, guessed from its files.
+#[derive(Debug, PartialEq)]
+pub struct Detected {
+    pub command: &'static str,
+    /// Shell prefix the agents need to run it.
+    pub allow: &'static str,
+    pub docker: bool,
+}
+
+pub fn detect_build(repo: &Path) -> Option<Detected> {
+    let has = |f: &str| repo.join(f).exists();
+    let (command, allow) = if has("mvnw") {
+        ("./mvnw -B verify", "./mvnw")
+    } else if has("pom.xml") {
+        ("mvn -B verify", "mvn")
+    } else if has("gradlew") {
+        ("./gradlew build", "./gradlew")
+    } else if has("package.json") {
+        ("npm test", "npm test")
+    } else if has("Cargo.toml") {
+        ("cargo test", "cargo test")
+    } else if has("go.mod") {
+        ("go test ./...", "go test")
+    } else {
+        return None;
+    };
+    Some(Detected { command, allow, docker: uses_testcontainers(repo, 2) })
+}
+
+/// Testcontainers in a build file at the root or `depth` module levels below.
+fn uses_testcontainers(dir: &Path, depth: u32) -> bool {
+    let builds = ["pom.xml", "build.gradle", "build.gradle.kts"];
+    if builds.iter().any(|b| std::fs::read_to_string(dir.join(b)).is_ok_and(|t| t.contains("testcontainers"))) {
+        return true;
+    }
+    depth > 0
+        && std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let name = e.file_name();
+            let hidden = name.to_string_lossy().starts_with('.') || name == "node_modules" || name == "target";
+            !hidden && e.path().is_dir() && uses_testcontainers(&e.path(), depth - 1)
+        })
+}
+
+/// The template with the build section filled in from what the repository looks like.
+pub fn suggested_toml(repo: &Path) -> String {
+    let text = default_toml().to_string();
+    let Some(d) = detect_build(repo) else { return text };
+    let requires = if d.docker { r#"["docker"]"# } else { "[]" };
+    text.replacen(
+        "# command = \"mvn -B verify\"\nrequires = []                 # e.g. [\"docker\"]",
+        &format!("command = \"{}\"           # detected\nrequires = {requires}", d.command),
+        1,
+    )
+    .replacen("\"git branch --show-current\"]", &format!("\"git branch --show-current\", \"{}\"]", d.allow), 1)
 }
 
 impl Policy {
@@ -629,6 +714,23 @@ mod tests {
         assert!(matches!(w(Role::Analyst, ".ai-tasks/notes/x.md"), Verdict::Deny(_)));
         assert!(matches!(w(Role::Analyst, ".ai-tasks/policy.toml"), Verdict::Deny(_)));
         assert!(matches!(eval(&p, Role::Analyst, "Edit", json!({})), Verdict::Deny(_)));
+    }
+
+    #[test]
+    fn suggested_policy_detects_the_build() {
+        let dir = std::env::temp_dir().join(format!("harness-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("svc")).unwrap();
+        assert_eq!(suggested_toml(&dir), default_toml(), "nothing recognised: plain template");
+        std::fs::write(dir.join("pom.xml"), "<project/>").unwrap();
+        std::fs::write(dir.join("svc/pom.xml"), "<artifactId>testcontainers</artifactId>").unwrap();
+        let p = Policy::from_toml(&suggested_toml(&dir)).unwrap();
+        assert_eq!(p.build.command.as_deref(), Some("mvn -B verify"));
+        assert_eq!(p.build.requires, vec!["docker".to_string()]);
+        assert!(p.shell.allow.contains(&"mvn".to_string()));
+        std::fs::write(dir.join("mvnw"), "").unwrap();
+        assert_eq!(detect_build(&dir).unwrap().command, "./mvnw -B verify");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

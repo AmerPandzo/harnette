@@ -23,13 +23,15 @@
     version: number;
     busy: boolean;
     onrefine: () => void;
-    onrun: () => void;
+    /** base: review against this branch/ref instead of the loop's first checkpoint. */
+    onrun: (base: string) => void;
     ondeliver: () => void;
     onclose: () => void;
   } = $props();
 
   let checkpoints = $state<Checkpoint[]>([]);
   let view = $state<"doc" | "review">("doc");
+  let base = $state("");
   const runnable = $derived(["ready", "changes_requested", "in_review"].includes(task.status_kind));
 
   $effect(() => {
@@ -145,9 +147,17 @@
           disabled={busy || task.status_kind !== "analysis"}
           title="Continue the analysis after answering Open questions in the doc">Refine</button
         >
+        {#if task.status_kind === "in_review"}
+          <input
+            class="base"
+            bind:value={base}
+            placeholder="vs. checkpoint"
+            title="Review against a branch or ref (e.g. develop) when the work is already committed. Empty = since the loop's first checkpoint."
+          />
+        {/if}
         <button
           class:primary={runnable}
-          onclick={onrun}
+          onclick={() => onrun(task.status_kind === "in_review" ? base.trim() : "")}
           disabled={busy || !runnable}
           title="Implement → build → review until Done">Run</button
         >
@@ -314,5 +324,9 @@
   }
   article :global(a) {
     color: var(--accent);
+  }
+  .base {
+    width: 9em;
+    font-size: 12px;
   }
 </style>

@@ -275,6 +275,9 @@ pub struct LoopConfig {
     pub claude_bin: String,
     pub copilot_bin: String,
     pub guard_bin: Option<PathBuf>,
+    /// Review against this branch or ref (its merge-base with HEAD) instead of the first checkpoint,
+    /// for work that is already committed.
+    pub base: Option<String>,
     /// Usage of this task before the loop (from the ledger), for budgets.
     pub prior: PriorUsage,
 }
@@ -288,6 +291,7 @@ impl LoopConfig {
             claude_bin: "claude".into(),
             copilot_bin: "copilot".into(),
             guard_bin: None,
+            base: None,
             prior: PriorUsage::default(),
         }
     }
@@ -352,6 +356,11 @@ where
         bail!(reason);
     }
     let policy = Policy::load(&repo)?;
+    if let Some(b) = &cfg.base
+        && git::merge_base(&repo, b).is_err()
+    {
+        bail!("Review base {b:?} is not a branch or ref in this repository.");
+    }
     build::check_requires(&policy.build.requires)?;
 
     let loop_id = format!("loop-{}", new_run_id().trim_start_matches("run-"));
@@ -445,6 +454,33 @@ async fn run_agent(session: &Session, cfg: RunConfig, claude_model: Option<Strin
     session.wait_with_fallback(handle, cfg, claude_model, sink).await
 }
 
+/// Run the policy's build command, record it for delivery and report it. None when no command is set.
+async fn harness_build(
+    session: &Session,
+    policy: &Policy,
+    repo: &std::path::Path,
+    slug: &str,
+    round: u32,
+    run_dir: &std::path::Path,
+    sink: &Sink,
+) -> anyhow::Result<Option<BuildOutcome>> {
+    let Some(command) = &policy.build.command else { return Ok(None) };
+    build::check_requires(&policy.build.requires)?;
+    let log = run_dir.join(format!("build-{round}.log"));
+    let outcome = build::run_build(repo, command, &log, &session.inner.cancel).await?;
+    let tree = git::tree_of(repo, &git::snapshot(repo)?)?;
+    let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    crate::delivery::record_build(repo, slug, &crate::delivery::LastBuild { ok: outcome.ok, command: command.clone(), tree, ts_ms })?;
+    sink(RunEvent::Build {
+        ok: outcome.ok,
+        command: command.clone(),
+        duration_ms: outcome.duration_ms,
+        tail: outcome.tail.clone(),
+        log: outcome.log.display().to_string(),
+    });
+    Ok(Some(outcome))
+}
+
 async fn run_loop(
     session: &Session,
     cfg: &LoopConfig,
@@ -495,52 +531,37 @@ async fn run_loop(
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }
-                last_build = match &policy.build.command {
-                    Some(command) => {
-                        build::check_requires(&policy.build.requires)?;
-                        let log = run_dir.join(format!("build-{round}.log"));
-                        let outcome = build::run_build(repo, command, &log, &session.inner.cancel).await?;
-                        let tree = git::tree_of(repo, &git::snapshot(repo)?)?;
-                        let ts_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
-                        crate::delivery::record_build(
-                            repo,
-                            slug,
-                            &crate::delivery::LastBuild { ok: outcome.ok, command: command.clone(), tree, ts_ms },
-                        )?;
-                        sink(RunEvent::Build {
-                            ok: outcome.ok,
-                            command: command.clone(),
-                            duration_ms: outcome.duration_ms,
-                            tail: outcome.tail.clone(),
-                            log: outcome.log.display().to_string(),
-                        });
-                        if session.cancelled() {
-                            return Ok("Stopped by the human.".into());
-                        }
-                        Some(outcome)
-                    }
-                    None => None,
-                };
+                last_build = harness_build(session, policy, repo, slug, round, run_dir, sink).await?;
+                if session.cancelled() {
+                    return Ok("Stopped by the human.".into());
+                }
                 tasks::set_status(repo, slug, StatusKind::InReview)?;
                 sink(RunEvent::StatusChanged { to: StatusKind::InReview.label().into(), by: "harness".into(), reason: None });
             }
             Step::Review => {
                 let review_round = round.max(1);
                 sink(RunEvent::Phase { round: review_round, role: "reviewer".into() });
-                // Everything since the first checkpoint of this task, or since HEAD when none exists.
-                let base = git::list_checkpoints(repo, slug)?
-                    .first()
-                    .map(|c| c.git_ref.clone())
-                    .or(git::head(repo)?)
-                    .context("nothing to diff against: no checkpoint and no commits")?;
+                // Everything since the given base, else the first checkpoint of this task, else HEAD.
+                let base = match &cfg.base {
+                    Some(b) => git::merge_base(repo, b).with_context(|| format!("base {b:?} is not a branch or ref here"))?,
+                    None => git::list_checkpoints(repo, slug)?
+                        .first()
+                        .map(|c| c.git_ref.clone())
+                        .or(git::head(repo)?)
+                        .context("nothing to diff against: no checkpoint and no commits")?,
+                };
                 let patch = git::diff(repo, &base)?;
                 let diff_file = run_dir.join(format!("diff-{review_round}.patch"));
                 std::fs::write(&diff_file, &patch)?;
                 let diff_path = diff_file.strip_prefix(repo).unwrap_or(&diff_file).display().to_string();
 
+                // Work done outside the loop (e.g. by hand) is built before the review too.
+                if last_build.is_none() && policy.build.command.is_some() {
+                    last_build = harness_build(session, policy, repo, slug, review_round, run_dir, sink).await?;
+                    if session.cancelled() {
+                        return Ok("Stopped by the human.".into());
+                    }
+                }
                 let build = match (&policy.build.command, &last_build) {
                     (Some(command), Some(b)) => Some(BuildSummary { ok: b.ok, command: command.clone(), tail: b.tail.clone() }),
                     _ => None,
