@@ -17,6 +17,9 @@ pub enum RunEvent {
         /// Full tool input for policy checks; not sent to the UI or journal (Write content can be large).
         #[serde(skip)]
         input: Value,
+        /// What an edit changes, for the feed: `{ "path", "removed": [lines], "added": [lines], "more": n }`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff: Option<Value>,
     },
     ToolResult { tool_use_id: String, is_error: bool, summary: String },
     /// Decided by policy without asking the human.
@@ -88,6 +91,28 @@ pub fn summarize_tool(tool: &str, input: &Value) -> String {
     truncate(&s.unwrap_or_else(|| input.to_string()), SUMMARY_MAX)
 }
 
+const DIFF_LINES: usize = 40;
+
+/// The lines an Edit / MultiEdit / Write removes and adds, capped for the feed.
+pub fn edit_diff(tool: &str, input: &Value) -> Option<Value> {
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let pairs: Vec<(String, String)> = match tool {
+        "Edit" => vec![(s(input, "old_string"), s(input, "new_string"))],
+        "MultiEdit" => input.get("edits")?.as_array()?.iter().map(|e| (s(e, "old_string"), s(e, "new_string"))).collect(),
+        "Write" => vec![(String::new(), s(input, "content"))],
+        _ => return None,
+    };
+    let (mut removed, mut added) = (vec![], vec![]);
+    for (old, new) in &pairs {
+        removed.extend(old.lines().map(String::from));
+        added.extend(new.lines().map(String::from));
+    }
+    let more = removed.len().saturating_sub(DIFF_LINES) + added.len().saturating_sub(DIFF_LINES);
+    removed.truncate(DIFF_LINES);
+    added.truncate(DIFF_LINES);
+    Some(serde_json::json!({ "path": s(input, "file_path"), "removed": removed, "added": added, "more": more }))
+}
+
 fn tool_result_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -128,7 +153,13 @@ pub fn parse_line(line: &str) -> Parsed {
                     Some("tool_use") => {
                         let tool = str_at(c, "name");
                         let input = c.get("input").cloned().unwrap_or(Value::Null);
-                        Some(RunEvent::ToolUse { id: str_at(c, "id"), summary: summarize_tool(&tool, &input), tool, input })
+                        Some(RunEvent::ToolUse {
+                            id: str_at(c, "id"),
+                            summary: summarize_tool(&tool, &input),
+                            diff: edit_diff(&tool, &input),
+                            tool,
+                            input,
+                        })
                     }
                     _ => None,
                 })
@@ -198,6 +229,16 @@ mod tests {
     }
 
     #[test]
+    fn edit_diffs_for_the_feed() {
+        let d = edit_diff("Edit", &json!({"file_path":"/r/a.js","old_string":"a\nb","new_string":"a\nc\nd"})).unwrap();
+        assert_eq!(d, json!({"path":"/r/a.js","removed":["a","b"],"added":["a","c","d"],"more":0}));
+        let big = "x\n".repeat(100);
+        let w = edit_diff("Write", &json!({"file_path":"/r/b.js","content": big})).unwrap();
+        assert_eq!((w["added"].as_array().unwrap().len(), w["more"].as_u64().unwrap()), (40, 60));
+        assert!(edit_diff("Read", &json!({"file_path":"/r/a.js"})).is_none());
+    }
+
+    #[test]
     fn parses_tool_use_and_text() {
         let line = r#"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":2,"cache_read_input_tokens":9000,"cache_creation_input_tokens":30,"output_tokens":5},"content":[{"type":"thinking","thinking":""},{"type":"text","text":"Hi"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/r/a.md"}}]}}"#;
         assert_eq!(
@@ -208,7 +249,8 @@ mod tests {
                     id: "t1".into(),
                     tool: "Read".into(),
                     summary: "/r/a.md".into(),
-                    input: json!({"file_path":"/r/a.md"})
+                    input: json!({"file_path":"/r/a.md"}),
+                    diff: None,
                 },
                 RunEvent::Usage { message_id: "m1".into(), new_tokens: 37 },
             ])

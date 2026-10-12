@@ -3,14 +3,17 @@
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
+  import ActionDock from "$lib/ActionDock.svelte";
   import Board from "$lib/Board.svelte";
+  import Icon from "$lib/Icon.svelte";
+  import NewAnalysis from "$lib/NewAnalysis.svelte";
   import DeliveryCard from "$lib/DeliveryCard.svelte";
   import MaintenanceView from "$lib/MaintenanceView.svelte";
   import PolicyView from "$lib/PolicyView.svelte";
   import RunView from "$lib/RunView.svelte";
   import TaskDetail from "$lib/TaskDetail.svelte";
-  import { answer, initRunEvents, onRunExit, resumeRun, run, startLoop, startRun, stopRun } from "$lib/run.svelte";
-  import { fmtTokens, remember, remembered, type TaskSummary } from "$lib/types";
+  import { initRunEvents, onRunExit, run, startLoop, startRun } from "$lib/run.svelte";
+  import { remember, remembered, type TaskSummary } from "$lib/types";
 
   let repoInput = $state(remembered("kormilant.repo", ""));
   let repo = $state(""); // the watched, resolved repo
@@ -20,6 +23,8 @@
   let version = $state(0);
   let tab = $state<"board" | "run" | "policy" | "maintenance">("board");
   let recent = $state<string[]>(JSON.parse(remembered("kormilant.recentRepos", "[]")));
+  let showNew = $state(false);
+  let repoMenu = $state(false);
   const repoName = (p: string) => p.split("/").filter(Boolean).at(-1) ?? p;
 
   let selectedTask = $derived(tasks.find((t) => t.slug === selected) ?? null);
@@ -101,205 +106,317 @@
 </script>
 
 <div class="app">
-  <header>
-    <div class="brand">Kormilant</div>
-    <form class="repo" onsubmit={(e) => (e.preventDefault(), connect(repoInput))}>
-      <input bind:value={repoInput} placeholder="Choose a repository or type ~/path" />
-      <button type="button" onclick={chooseRepo}>Choose…</button>
-      {#if recent.length > 1}
-        <select
-          title="Recent repositories"
-          value=""
-          onchange={(e) => {
-            const v = (e.target as HTMLSelectElement).value;
-            (e.target as HTMLSelectElement).value = "";
-            if (v) connect(v);
-          }}
-        >
-          <option value="" disabled>Recent</option>
-          {#each recent.filter((r) => r !== repo) as r (r)}
-            <option value={r}>{repoName(r)}</option>
+  <aside class="sidebar">
+    <div class="traffic" data-tauri-drag-region></div>
+    <div class="repo-wrap">
+      <button class="repo-btn" onclick={() => (repoMenu = !repoMenu)} title={repo || "Choose a repository"}>
+        <span class="repo-icon"><Icon name="folder" size={14} /></span>
+        <span class="repo-name">{repo ? repoName(repo) : "Choose repository"}</span>
+        <Icon name="chevron" size={13} />
+      </button>
+      {#if repoMenu}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div class="menu-scrim" onclick={() => (repoMenu = false)}></div>
+        <div class="menu">
+          {#each recent as r (r)}
+            <button class="menu-item" class:on={r === repo} onclick={() => ((repoMenu = false), connect(r))}>
+              <Icon name="folder" size={13} />
+              <span class="mi-name">{repoName(r)}</span>
+              <span class="mi-path">{r.replace(/^\/Users\/[^/]+/, "~")}</span>
+            </button>
           {/each}
-        </select>
-      {/if}
-    </form>
-    <nav>
-      <button class:on={tab === "board"} onclick={() => (tab = "board")}>Board</button>
-      <button class:on={tab === "run"} onclick={() => (tab = "run")}>
-        Run{#if run.running}<span class="dot" title="Running"></span>{/if}
-      </button>
-      <button class:on={tab === "policy"} onclick={() => (tab = "policy")} disabled={!repo}>Policy</button>
-      <button class:on={tab === "maintenance"} onclick={() => (tab = "maintenance")}>
-        Maintenance{#if run.alarms.length}<span class="dot warn" title="Alarms"></span>{/if}
-      </button>
-    </nav>
-    <div class="status">
-      {#if run.quota}
-        <span class="meter" title="Claude subscription usage, 5-hour window">
-          5h <span class="bar"><span style="width: {pct(run.quota.five_hour)}"></span></span>
-          {pct(run.quota.five_hour)}
-        </span>
-        <span class="meter" title="Claude subscription usage, 7-day window">
-          7d <span class="bar"><span style="width: {pct(run.quota.seven_day)}"></span></span>
-          {pct(run.quota.seven_day)}
-        </span>
-      {/if}
-      {#if run.running}
-        <span class="meta" title="This session: new tokens · cost of finished agent runs">
-          {run.slug} · {fmtTokens(run.tokens)} tok · ${run.usd.toFixed(3)}
-        </span>
-      {:else if run.finished}
-        <span class="meta" title="Last run">${run.finished.cost_usd.toFixed(4)} · {(run.finished.duration_ms / 1000).toFixed(0)}s</span>
-      {/if}
-    </div>
-  </header>
-
-  {#if repoError}<p class="error banner">{repoError}</p>{/if}
-
-  {#if run.paused}
-    <div class="ask paused">
-      <div><b>{run.slug} is paused.</b> {run.paused}</div>
-      <div class="ask-actions">
-        <button class="deny" onclick={stopRun}>Stop</button>
-        <button class="primary" onclick={resumeRun}>Resume</button>
-      </div>
-    </div>
-  {:else if run.warning}
-    <div class="ask warnbar">
-      <div>⚠ {run.warning}</div>
-      <div class="ask-actions"><button onclick={() => (run.warning = null)}>Dismiss</button></div>
-    </div>
-  {/if}
-
-  {#if delivering && repo}
-    <DeliveryCard {repo} slug={delivering} onclose={() => ((delivering = null), refresh())} />
-  {/if}
-
-  {#each run.asks as a (a.request_id)}
-    <div class="ask">
-      <div>
-        <div>{run.slug}: allow <b>{a.tool}</b>?</div>
-        <code>{a.summary}</code>
-      </div>
-      <div class="ask-actions">
-        <button class="deny" onclick={() => answer(a, false)}>Deny</button>
-        <button class="primary" onclick={() => answer(a, true)}>Allow once</button>
-      </div>
-    </div>
-  {/each}
-
-  <div class="body">
-    {#if tab === "board"}
-      {#if !repo}
-        <p class="empty">Choose a repository to see its tasks.</p>
-      {:else}
-        <div class="boardview" class:split={selectedTask}>
-          <div class="boardpane">
-            <div class="boardbar">
-              <span class="where">
-                <b>{repoName(repo)}</b>
-                <span class="meta">{tasks.length} task{tasks.length === 1 ? "" : "s"} in <code>.ai-tasks/</code></span>
-              </span>
-              <button class="primary" onclick={() => (tab = "run")}>New analysis</button>
-            </div>
-            <Board {tasks} {selected} onselect={(s) => (selected = selected === s ? null : s)} />
-          </div>
-          {#if selectedTask}
-            <TaskDetail {repo} task={selectedTask} {version} busy={run.running} onrefine={refine} onrun={runTask} ondeliver={() => (delivering = selectedTask?.slug ?? null)} onclose={() => (selected = null)} />
-          {/if}
+          <form class="menu-path" onsubmit={(e) => (e.preventDefault(), (repoMenu = false), connect(repoInput))}>
+            <input bind:value={repoInput} placeholder="~/path/to/repo — Enter to open" />
+          </form>
+          <button class="menu-item" onclick={() => ((repoMenu = false), chooseRepo())}><Icon name="plus" size={13} /> Choose folder…</button>
         </div>
       {/if}
-    {:else if tab === "policy"}
-      <PolicyView {repo} />
-    {:else if tab === "maintenance"}
-      <MaintenanceView />
-    {:else}
-      <RunView {repo} />
-    {/if}
-  </div>
+    </div>
+
+    <nav>
+      <button class:on={tab === "board"} onclick={() => (tab = "board")}><Icon name="board" size={15} /> Board</button>
+      <button class:on={tab === "run"} onclick={() => (tab = "run")}>
+        <Icon name="run" size={15} /> Run
+        {#if run.running}<span class="live" class:warn={run.asks.length || run.paused}></span>{/if}
+      </button>
+      <button class:on={tab === "policy"} onclick={() => (tab = "policy")} disabled={!repo}><Icon name="shield" size={15} /> Policy</button>
+      <button class:on={tab === "maintenance"} onclick={() => (tab = "maintenance")}>
+        <Icon name="gauge" size={15} /> Usage
+        {#if run.alarms.length}<span class="badge">{run.alarms.length}</span>{/if}
+      </button>
+    </nav>
+
+    <button class="new primary" onclick={() => (showNew = true)} disabled={!repo || run.running}><Icon name="plus" size={14} /> New analysis</button>
+
+    <div class="foot">
+      {#if run.running}
+        <button class="running" onclick={() => (tab = "run")}>
+          <span class="live" class:warn={run.asks.length || run.paused}></span>
+          <span class="r-slug">{run.slug}</span>
+          <span class="r-meta">{run.asks.length ? "needs you" : run.paused ? "paused" : run.role || "running"}</span>
+        </button>
+      {/if}
+      {#if run.quota}
+        <div class="meter" title="Claude subscription usage, 5-hour window">
+          <span>5h</span><span class="bar"><span style="width: {pct(run.quota.five_hour)}"></span></span><span>{pct(run.quota.five_hour)}</span>
+        </div>
+        <div class="meter" title="Claude subscription usage, 7-day window">
+          <span>7d</span><span class="bar"><span style="width: {pct(run.quota.seven_day)}"></span></span><span>{pct(run.quota.seven_day)}</span>
+        </div>
+      {/if}
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar" data-tauri-drag-region>
+      <h1 data-tauri-drag-region>
+        {({ board: "Board", run: "Run", policy: "Policy", maintenance: "Usage" } as const)[tab]}
+        {#if tab === "board" && repo}<span class="sub">{tasks.length} task{tasks.length === 1 ? "" : "s"} in <code>.ai-tasks/</code></span>{/if}
+        {#if tab === "policy" && repo}<span class="sub"><code>.ai-tasks/policy.toml</code> · checked on every agent tool call</span>{/if}
+      </h1>
+    </div>
+
+    {#if repoError}<p class="error banner">{repoError}</p>{/if}
+
+    <div class="body">
+      {#if tab === "board"}
+        {#if !repo}
+          <div class="empty">
+            <div class="emptyicon"><Icon name="folder" size={22} /></div>
+            <h2>Choose a repository</h2>
+            <p>Kormilant reads its tasks from <code>.ai-tasks/</code>.</p>
+            <button class="primary" onclick={chooseRepo}>Choose folder…</button>
+          </div>
+        {:else}
+          <div class="boardview" class:split={selectedTask}>
+            <Board {tasks} {selected} onselect={(s) => (selected = selected === s ? null : s)} />
+            {#if selectedTask}
+              <TaskDetail
+                {repo}
+                task={selectedTask}
+                {version}
+                busy={run.running}
+                onrefine={refine}
+                onrun={runTask}
+                ondeliver={() => (delivering = selectedTask?.slug ?? null)}
+                onclose={() => (selected = null)}
+              />
+            {/if}
+          </div>
+        {/if}
+      {:else if tab === "policy"}
+        <PolicyView {repo} />
+      {:else if tab === "maintenance"}
+        <MaintenanceView />
+      {:else}
+        <RunView {repo} onnew={() => (showNew = true)} />
+      {/if}
+    </div>
+  </main>
 </div>
+
+{#if delivering && repo}
+  <DeliveryCard {repo} slug={delivering} onclose={() => ((delivering = null), refresh())} />
+{/if}
+{#if showNew && repo}
+  <NewAnalysis {repo} onclose={() => (showNew = false)} onstarted={() => ((showNew = false), (tab = "run"))} />
+{/if}
+<ActionDock raised={tab === "run"} />
 
 <style>
   .app {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
     height: 100vh;
   }
-  header {
+  .sidebar {
     display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel);
-    flex-wrap: wrap;
-  }
-  .brand {
-    font-weight: 700;
-    font-size: 16px;
-  }
-  .repo {
-    display: flex;
+    flex-direction: column;
     gap: 6px;
-    flex: 1;
-    min-width: 260px;
-    max-width: 520px;
+    padding: 0 10px 12px;
+    background: var(--sidebar);
+    border-right: 1px solid var(--line);
+    min-height: 0;
   }
-  .repo input {
+  .traffic {
+    height: 40px;
+    flex: none;
+  }
+  .repo-wrap {
+    position: relative;
+  }
+  .repo-btn {
+    width: 100%;
+    justify-content: flex-start;
+    height: 34px;
+    padding: 0 8px;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+  }
+  .repo-btn:hover:not(:disabled) {
+    background: var(--hover);
+  }
+  .repo-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    background: var(--accent);
+    color: #fff;
+  }
+  .repo-name {
     flex: 1;
-    min-width: 0;
-    padding: 5px 8px;
+    text-align: left;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .menu-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+  }
+  .menu {
+    position: absolute;
+    top: 38px;
+    left: 0;
+    width: 320px;
+    z-index: 31;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .menu-item {
+    justify-content: flex-start;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    height: 30px;
+    padding: 0 8px;
+    color: var(--ink);
+  }
+  .menu-item:hover:not(:disabled),
+  .menu-item.on {
+    background: var(--hover);
+  }
+  .mi-name {
+    font-weight: 500;
+  }
+  .mi-path {
+    margin-left: auto;
+    color: var(--faint);
+    font-size: 11px;
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+  }
+  .menu-path {
+    padding: 4px;
+  }
+  .menu-path input {
+    width: 100%;
   }
   nav {
     display: flex;
-    gap: 4px;
+    flex-direction: column;
+    gap: 1px;
+    margin-top: 6px;
   }
   nav button {
+    justify-content: flex-start;
+    gap: 9px;
+    height: 30px;
+    padding: 0 9px;
     border-color: transparent;
     background: transparent;
+    box-shadow: none;
+    color: var(--quiet);
   }
-  nav button.on {
-    background: var(--accent-soft);
-    border-color: var(--accent);
+  nav button:hover:not(:disabled) {
+    background: var(--hover);
+    color: var(--ink);
   }
-  .dot {
-    display: inline-block;
+  nav button.on,
+  nav button.on:hover:not(:disabled) {
+    background: var(--raised);
+    color: var(--ink);
+    box-shadow: var(--shadow-sm);
+    border-color: var(--line);
+  }
+  .live {
     width: 7px;
     height: 7px;
-    margin-left: 6px;
     border-radius: 50%;
     background: var(--accent);
-    vertical-align: middle;
-  }
-  .dot.warn {
-    background: #d99a2b;
-  }
-  .ask.paused {
-    border-color: var(--bad);
-  }
-  .ask.warnbar {
-    border-color: #d99a2b;
-  }
-  .status {
-    display: flex;
-    gap: 14px;
-    align-items: center;
-    font-size: 12px;
     margin-left: auto;
+    animation: pulse 1.4s ease-in-out infinite;
   }
-  .meta {
+  .live.warn {
+    background: var(--warn);
+  }
+  .badge {
+    margin-left: auto;
+    font-size: 10.5px;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--warn);
+    color: #fff;
+    display: grid;
+    place-items: center;
+  }
+  .new {
+    margin-top: 10px;
+  }
+  .foot {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .running {
+    justify-content: flex-start;
+    height: auto;
+    padding: 8px 10px;
+    gap: 8px;
+    text-align: left;
+  }
+  .running .live {
+    margin-left: 0;
+  }
+  .r-slug {
+    font-weight: 600;
+  }
+  .r-meta {
+    margin-left: auto;
     color: var(--quiet);
-    font-size: 12px;
+    font-size: 11.5px;
+    font-weight: 400;
   }
   .meter {
-    display: inline-flex;
-    gap: 6px;
+    display: grid;
+    grid-template-columns: 20px 1fr 32px;
     align-items: center;
+    gap: 6px;
     color: var(--quiet);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    padding: 0 4px;
+  }
+  .meter span:last-child {
+    text-align: right;
   }
   .bar {
-    width: 60px;
-    height: 6px;
+    height: 5px;
     background: var(--line);
     border-radius: 3px;
     overflow: hidden;
@@ -308,62 +425,76 @@
     display: block;
     height: 100%;
     background: var(--accent);
+    border-radius: 3px;
+  }
+  main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg);
+  }
+  .topbar {
+    height: 46px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    padding: 6px 22px 0;
+  }
+  h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 650;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .sub {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--quiet);
   }
   .banner {
-    padding: 8px 16px;
-  }
-  .ask {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    margin: 10px 16px 0;
-    padding: 10px 14px;
-    border: 1px solid var(--accent);
-    border-radius: 8px;
-    background: var(--warn-bg);
-  }
-  .ask-actions {
-    display: flex;
-    gap: 8px;
-    flex-shrink: 0;
+    padding: 8px 22px;
   }
   .body {
     flex: 1;
     min-height: 0;
   }
   .empty {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     color: var(--quiet);
-    padding: 24px 16px;
+    text-align: center;
+  }
+  .empty h2 {
+    margin: 6px 0 0;
+    font-size: 16px;
+    color: var(--ink);
+  }
+  .empty p {
+    margin: 0 0 10px;
+  }
+  .emptyicon {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    display: grid;
+    place-items: center;
+    background: var(--accent-soft);
+    color: var(--accent);
   }
   .boardview {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     height: 100%;
-  }
-  .boardview.split {
-    grid-template-columns: minmax(0, 1fr) minmax(380px, 46%);
-  }
-  .boardpane {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
     min-height: 0;
   }
-  .where {
-    display: flex;
-    gap: 8px;
-    align-items: baseline;
-    font-size: 15px;
-  }
-  .repo select {
-    padding: 5px 6px;
-    max-width: 120px;
-  }
-  .boardbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 10px 16px 0;
+  .boardview.split {
+    grid-template-columns: minmax(0, 1fr) minmax(440px, 50%);
   }
 </style>

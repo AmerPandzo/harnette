@@ -603,7 +603,10 @@
   }
   .name.wide {
     width: auto;
+    flex: 1;
+    min-width: 0;
     font-weight: 400;
+    white-space: normal;
   }
   .pack {
     font-size: 12px;

@@ -1,40 +1,86 @@
 <script lang="ts">
-  import { remember, remembered } from "./types";
-  import { pauseRun, resumeRun, run, sendNote, startRun, stopRun } from "./run.svelte";
+  import DOMPurify from "dompurify";
+  import { marked } from "marked";
+  import { onMount } from "svelte";
+  import Icon from "./Icon.svelte";
+  import { buildTimeline, fmtDuration, shortPath, toolIcon, toolVerb, type Section, type ToolItem } from "./feed";
+  import { pauseRun, resumeRun, run, sendNote, stopRun } from "./run.svelte";
+  import { fmtTokens } from "./types";
 
-  let { repo }: { repo: string } = $props();
+  let { repo, onnew }: { repo: string; onnew: () => void } = $props();
 
-  let slug = $state("");
-  let model = $state(remembered("kormilant.model", ""));
-  let ticket = $state("");
   let note = $state("");
   let feedEl: HTMLElement | undefined = $state();
+  let open = $state<Record<string, boolean>>({});
+  let now = $state(Date.now());
+  let stick = true;
 
-  // Tool results and decisions are shown on their tool-call row, not as separate rows.
-  let results = $derived(new Map(run.events.filter((e) => e.kind === "tool_result").map((e) => [e.tool_use_id, e])));
-  let decisions = $derived(
-    run.events.filter((e) => e.kind === "permission_auto" || e.kind === "permission_answered"),
-  );
-  let feed = $derived(run.events.filter((e) => e.kind !== "tool_result" && e.kind !== "quota"));
-  const decisionFor = (summary: string) => decisions.findLast((d) => "summary" in d && d.summary === summary);
+  let sections = $derived(buildTimeline(run.events, run.mode === "loop" ? "" : "analyst"));
 
-  $effect(() => {
-    void feed.length;
-    queueMicrotask(() => feedEl?.scrollTo({ top: feedEl.scrollHeight, behavior: "smooth" }));
+  // Agent-written markdown: sanitize before it reaches the webview, which can call Tauri commands.
+  const md = (s: string) => DOMPurify.sanitize(marked.parse(s, { async: false }) as string);
+  const short = (s: string) => shortPath(s, repo);
+
+  const ROLE: Record<string, { label: string; icon: string; color: string }> = {
+    analyst: { label: "Analyst", icon: "sparkles", color: "var(--role-analyst)" },
+    implementer: { label: "Implementer", icon: "edit", color: "var(--role-implementer)" },
+    reviewer: { label: "Reviewer", icon: "eye", color: "var(--role-reviewer)" },
+  };
+  const role = (r: string) => ROLE[r] ?? { label: r || "Agent", icon: "zap", color: "var(--accent)" };
+  const modeLabel = (m: string) => ({ analyze: "Analysis", refine: "Refine", loop: "Implement → build → review" })[m] ?? m;
+
+  /** The trail of steps at the top: each agent run and build, in order. */
+  let trail = $derived.by(() => {
+    const out: { label: string; icon: string; state: "done" | "active" | "bad"; color: string }[] = [];
+    for (const s of sections) {
+      if (s.kind === "agent") {
+        const r = role(s.role);
+        out.push({
+          label: r.label + (s.round ? ` ${s.round}` : ""),
+          icon: r.icon,
+          color: r.color,
+          state: !s.exited ? "active" : s.finished?.ok === false ? "bad" : "done",
+        });
+      }
+      for (const it of s.items)
+        if (it.t === "build") out.push({ label: "Build", icon: "hammer", color: "var(--quiet)", state: it.e.ok ? "done" : "bad" });
+    }
+    return out;
   });
 
-  async function analyze(ev: Event) {
-    ev.preventDefault();
-    remember("kormilant.model", model);
-    try {
-      await startRun({ repo, slug: slug.trim(), mode: "analyze", ticket, model });
-      ticket = "";
-    } catch {}
-  }
+  let status = $derived(
+    run.running
+      ? run.paused
+        ? { label: "Paused", cls: "warn" }
+        : run.asks.length
+          ? { label: "Waiting for you", cls: "warn" }
+          : { label: "Running", cls: "accent" }
+      : run.ended
+        ? run.ended.ok
+          ? { label: "Finished", cls: "good" }
+          : { label: "Stopped", cls: "bad" }
+        : run.error
+          ? { label: "Failed to start", cls: "bad" }
+          : null,
+  );
 
-  async function submitNote(ev: Event) {
-    ev.preventDefault();
-    if (!note.trim()) return;
+  function onScroll() {
+    if (!feedEl) return;
+    stick = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 80;
+  }
+  $effect(() => {
+    void run.events.length;
+    if (stick) queueMicrotask(() => feedEl?.scrollTo({ top: feedEl.scrollHeight, behavior: "smooth" }));
+  });
+
+  onMount(() => {
+    const t = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(t);
+  });
+
+  async function submitNote(ev?: Event) {
+    ev?.preventDefault();
+    if (!note.trim() || !run.running) return;
     try {
       await sendNote(note.trim());
       note = "";
@@ -42,278 +88,708 @@
       run.error = String(e);
     }
   }
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submitNote();
+    }
+  }
+
+  const toggle = (k: string) => (open[k] = !open[k]);
+  const sectionCost = (s: Section) =>
+    s.finished ? `${fmtDuration(s.finished.duration_ms)} · ${fmtTokens(s.finished.new_tokens)} tok · $${s.finished.cost_usd.toFixed(3)}` : "";
+  const diffSize = (t: ToolItem) => (t.diff ? `+${t.diff.added.length}${t.diff.removed.length ? ` −${t.diff.removed.length}` : ""}` : "");
 </script>
 
-<div class="runview">
-  <aside>
-    <form onsubmit={analyze}>
-      <h3>New analysis <span class="in">in {repo.split("/").filter(Boolean).at(-1) ?? "no repository"}</span></h3>
-      <div class="row">
-        <label>Task slug<input bind:value={slug} placeholder="OAM-12345" required disabled={run.running} /></label>
-        <label
-          >Model
-          <select bind:value={model} disabled={run.running}>
-            <option value="">Default</option>
-            <option value="haiku">Haiku</option>
-            <option value="sonnet">Sonnet</option>
-            <option value="opus">Opus</option>
-          </select>
-        </label>
-      </div>
-      <label class="grow">Ticket<textarea bind:value={ticket} placeholder="Paste the ticket text" required disabled={run.running}></textarea></label>
-      <div class="actions">
-        <button type="submit" class="primary" disabled={run.running || !repo}>Analyze</button>
-        {#if run.paused}
-          <button type="button" onclick={resumeRun}>Resume</button>
-        {:else}
-          <button type="button" onclick={pauseRun} disabled={!run.running}>Pause</button>
+{#snippet toolRow(t: ToolItem, nested = false)}
+  {@const expandable = !!(t.result?.summary || t.diff)}
+  {@const isOpen = open[t.id] ?? (!!t.diff && t.diff.added.length + t.diff.removed.length <= 14)}
+  <div class="tool" class:nested class:err={t.result?.is_error || t.decision?.allowed === false} class:waiting={t.waiting}>
+    <button class="trow" onclick={() => expandable && (open[t.id] = !isOpen)} class:static={!expandable}>
+      <span class="ticon"><Icon name={toolIcon(t.tool)} size={13} /></span>
+      <span class="verb">{toolVerb(t.tool)}</span>
+      <span class="target">{short(t.summary)}</span>
+      {#if t.diff}<span class="dsize">{diffSize(t)}</span>{/if}
+      <span class="right">
+        {#if t.waiting}
+          <span class="pill warn"><span class="pulse"></span>waiting for you</span>
+        {:else if t.decision && !t.decision.allowed}
+          <span class="pill bad" title={t.decision.rule ?? ""}>denied{t.decision.by === "policy" ? "" : ` by ${t.decision.by}`}</span>
+        {:else if t.decision && t.decision.by !== "policy"}
+          <span class="pill good">allowed by {t.decision.by}</span>
         {/if}
-        <button type="button" onclick={stopRun} disabled={!run.running}>Stop</button>
-      </div>
-      {#if run.error}<p class="error">{run.error}</p>{/if}
-      <p class="hint">
-        Analysis only: the agent may read the repo and write <code>.ai-tasks/&lt;slug&gt;.md</code>. Unlisted actions ask you.
-      </p>
-    </form>
-  </aside>
-
-  <main>
-    <section class="feed" bind:this={feedEl}>
-      {#if feed.length === 0}
-        <p class="empty">The journal of the next run appears here.</p>
+        {#if t.result}
+          <span class="state" class:bad={t.result.is_error}><Icon name={t.result.is_error ? "x" : "check"} size={12} stroke={2.5} /></span>
+        {:else if !t.waiting && run.running}
+          <span class="spinner"></span>
+        {/if}
+        {#if expandable}<span class="chev" class:open={isOpen}><Icon name="chevron-right" size={12} /></span>{/if}
+      </span>
+    </button>
+    {#if isOpen}
+      {#if t.diff}
+        <pre class="diff">{#each t.diff.removed as l, i (i)}<span class="del">- {l}
+</span>{/each}{#each t.diff.added as l, i (i)}<span class="add">+ {l}
+</span>{/each}{#if t.diff.more}<span class="more">… {t.diff.more} more lines</span>{/if}</pre>
       {/if}
-      {#each feed as e, i (i)}
-        {#if e.kind === "text"}
-          <div class="ev text">{e.text}</div>
-        {:else if e.kind === "tool_use"}
-          {@const r = results.get(e.id)}
-          {@const d = decisionFor(e.summary)}
-          <div class="ev tool" class:err={r?.is_error}>
-            <span class="tool-name">{e.tool}</span>
-            <code>{e.summary}</code>
-            {#if d && d.kind === "permission_auto"}
-              <span class="badge" class:no={!d.allowed} title={d.rule}>{d.allowed ? "auto-allowed" : "auto-denied"}</span>
-            {:else if d && d.kind === "permission_answered"}
-              <span class="badge" class:no={!d.allowed}>{d.allowed ? "allowed" : "denied"} by {d.by}</span>
-            {/if}
-            {#if r}<div class="result">{r.summary}</div>{/if}
+      {#if t.result?.summary && (t.result.is_error || !t.diff)}
+        <pre class="out" class:bad={t.result.is_error}>{t.result.summary}</pre>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
+<div class="runview">
+  {#if run.events.length === 0 && !run.running}
+    <div class="empty">
+      <div class="emptyicon"><Icon name="run" size={22} /></div>
+      <h2>No run yet</h2>
+      <p>Start an analysis from a ticket, or pick a task on the Board and press <b>Run</b>.</p>
+      {#if run.error}<p class="error">{run.error}</p>{/if}
+      <button class="primary" onclick={onnew} disabled={!repo}><Icon name="plus" size={13} /> New analysis</button>
+    </div>
+  {:else}
+    <div class="head">
+      <div class="title">
+        <span class="slug">{run.slug}</span>
+        <span class="mode">{modeLabel(run.mode)}</span>
+        {#if status}<span class="pill {status.cls}">{#if status.cls === "accent"}<span class="pulse"></span>{/if}{status.label}</span>{/if}
+      </div>
+      <div class="stats">
+        {#if run.running}<span title="Elapsed"><Icon name="clock" size={13} /> {fmtDuration(now - run.startedAt)}</span>{/if}
+        <span title="New tokens this session"><Icon name="zap" size={13} /> {fmtTokens(run.tokens)}</span>
+        <span title="Cost of finished agent runs (API-equivalent)"><Icon name="coins" size={13} /> ${run.usd.toFixed(3)}</span>
+      </div>
+      <div class="ctl">
+        {#if run.running}
+          {#if run.paused}
+            <button onclick={resumeRun}><Icon name="run" size={12} /> Resume</button>
+          {:else}
+            <button onclick={pauseRun}><Icon name="pause" size={12} /> Pause</button>
+          {/if}
+          <button class="danger" onclick={stopRun}><Icon name="stop" size={12} /> Stop</button>
+        {:else}
+          <button onclick={onnew} disabled={!repo}><Icon name="plus" size={13} /> New analysis</button>
+        {/if}
+      </div>
+    </div>
+    {#if trail.length}
+      <div class="trail">
+        {#each trail as step, i (i)}
+          {#if i > 0}<span class="link"></span>{/if}
+          <span class="step {step.state}" style="--c: {step.color}">
+            {#if step.state === "active"}<span class="pulse"></span>{:else}<Icon
+                name={step.state === "bad" ? "x" : "check"}
+                size={11}
+                stroke={2.5}
+              />{/if}
+            {step.label}
+          </span>
+        {/each}
+      </div>
+    {/if}
+
+    <div class="feed" bind:this={feedEl} onscroll={onScroll}>
+      {#if run.error}<div class="callout bad"><Icon name="alert" size={14} /> {run.error}</div>{/if}
+      {#each sections as s, si (si)}
+        {#if s.kind === "agent"}
+          {@const r = role(s.role)}
+          <section class="agent" style="--c: {r.color}">
+            <header>
+              <span class="avatar"><Icon name={r.icon} size={14} /></span>
+              <span class="who">{r.label}</span>{#if s.round}<span class="round">round {s.round}</span>{/if}
+              {#if s.model}<span class="model">{s.model}</span>{/if}
+              <span class="cost">
+                {#if s.finished}{sectionCost(s)}{:else if !s.exited && run.running}<span class="working"><span class="spinner"></span> working</span>{/if}
+              </span>
+            </header>
+            <div class="items">
+              {#each s.items as it, ii (ii)}
+                {#if it.t === "text"}
+                  <div class="prose msg">{@html md(it.text)}</div>
+                {:else if it.t === "tool"}
+                  {@render toolRow(it)}
+                {:else if it.t === "explore"}
+                  {@const key = `${si}-${ii}`}
+                  <div class="tool">
+                    <button class="trow" onclick={() => toggle(key)}>
+                      <span class="ticon"><Icon name="search" size={13} /></span>
+                      <span class="verb">Explored</span>
+                      <span class="target"
+                        >{it.tools.length} items · {it.tools
+                          .slice(0, 3)
+                          .map((t) => short(t.summary).split("/").at(-1))
+                          .join(", ")}{it.tools.length > 3 ? "…" : ""}</span
+                      >
+                      <span class="right"><span class="chev" class:open={open[key]}><Icon name="chevron-right" size={12} /></span></span>
+                    </button>
+                    {#if open[key]}
+                      <div class="nestwrap">
+                        {#each it.tools as t (t.id)}{@render toolRow(t, true)}{/each}
+                      </div>
+                    {/if}
+                  </div>
+                {:else if it.t === "note"}
+                  <div class="you"><span class="youlabel">You</span>{it.text}</div>
+                {:else if it.t === "alarm"}
+                  <div class="callout" class:bad={it.e.action !== "warn"}>
+                    <Icon name="alert" size={14} />
+                    {it.e.message}{it.e.action !== "warn" ? ` → ${it.e.action}` : ""}
+                  </div>
+                {:else if it.t === "error"}
+                  <div class="callout bad"><Icon name="alert" size={14} /> {it.text}</div>
+                {:else if it.t === "paused"}
+                  <div class="mark"><Icon name="pause" size={12} /> Paused: {it.reason}</div>
+                {:else if it.t === "resumed"}
+                  <div class="mark"><Icon name="run" size={12} /> Resumed</div>
+                {/if}
+              {/each}
+              {#if s.items.length === 0 && !s.exited}
+                <div class="mark"><span class="spinner"></span> Starting…</div>
+              {/if}
+            </div>
+          </section>
+        {:else}
+          <div class="system">
+            {#each s.items as it, ii (ii)}
+              {#if it.t === "build"}
+                {@const key = `b-${si}-${ii}`}
+                <div class="build" class:bad={!it.e.ok}>
+                  <button class="trow" onclick={() => toggle(key)}>
+                    <span class="bicon"><Icon name="hammer" size={14} /></span>
+                    <span class="verb">{it.e.ok ? "Build passed" : "Build failed"}</span>
+                    <code>{it.e.command}</code>
+                    <span class="right">
+                      <span class="faint">{fmtDuration(it.e.duration_ms)}</span>
+                      <span class="chev" class:open={open[key]}><Icon name="chevron-right" size={12} /></span>
+                    </span>
+                  </button>
+                  {#if open[key]}<pre class="out">{it.e.tail}</pre>{/if}
+                </div>
+              {:else if it.t === "status"}
+                <div class="divider">
+                  <span>Status → <b>{it.e.to}</b> <span class="faint">by {it.e.by}</span></span>
+                </div>
+                {#if it.e.reason}<div class="mark center">{it.e.reason}</div>{/if}
+              {:else if it.t === "checkpoint"}
+                <div class="mark"><Icon name="branch" size={12} /> Checkpoint {it.e.round} <code>{it.e.git_ref}</code></div>
+              {:else if it.t === "info"}
+                <div class="mark"><Icon name="dot" size={12} /> {it.text}</div>
+              {:else if it.t === "delivery_ready"}
+                <div class="callout accent">
+                  <Icon name="package" size={14} /> Ready to deliver: {it.e.mode} to <code>{it.e.branch}</code>, {it.e.files.length} file{it.e.files.length === 1
+                    ? ""
+                    : "s"}. Approve it from the task.
+                </div>
+              {:else if it.t === "delivered"}
+                <div class="callout good">
+                  <Icon name="package" size={14} /> Delivered to <code>{it.e.branch}</code>{it.e.commit ? ` · ${it.e.commit.slice(0, 8)}` : ""}{it.e.pushed
+                    ? " · pushed"
+                    : ""}{#if it.e.pr_url}
+                    · {it.e.pr_url}{/if}
+                </div>
+              {:else if it.t === "ended"}
+                <div class="ended" class:bad={!it.e.ok}>
+                  <span class="eicon"><Icon name={it.e.ok ? "check" : "stop"} size={16} stroke={2.5} /></span>
+                  <div>
+                    <b>{it.e.summary}</b>
+                    <div class="faint">{fmtTokens(run.tokens)} tokens · ${run.usd.toFixed(3)}</div>
+                  </div>
+                </div>
+              {/if}
+            {/each}
           </div>
-        {:else if e.kind === "permission_ask"}
-          <div class="ev sys">Waiting for you: {e.tool} <code>{e.summary}</code></div>
-        {:else if e.kind === "note"}
-          <div class="ev note">You: {e.text}</div>
-        {:else if e.kind === "started"}
-          <div class="ev sys">Agent run {e.run_id} started for {e.slug}</div>
-        {:else if e.kind === "finished"}
-          <div class="ev sys">{e.ok ? "Finished" : "Failed"} · ${e.cost_usd.toFixed(4)}</div>
-        {:else if e.kind === "error"}
-          <div class="ev error">{e.message}</div>
-        {:else if e.kind === "exited"}
-          <div class="ev sys">Agent exited ({e.code ?? "killed"})</div>
-        {:else if e.kind === "phase"}
-          <div class="phase">Round {e.round} · {e.role === "implementer" ? "Implementer" : "Reviewer"}</div>
-        {:else if e.kind === "checkpoint"}
-          <div class="ev sys">Checkpoint {e.round} saved <code>{e.git_ref}</code></div>
-        {:else if e.kind === "build"}
-          <details class="ev build" class:err={!e.ok}>
-            <summary>
-              Build <code>{e.command}</code> <b class:no={!e.ok}>{e.ok ? "green" : "red"}</b> · {(e.duration_ms / 1000).toFixed(1)}s
-            </summary>
-            <pre>{e.tail}</pre>
-          </details>
-        {:else if e.kind === "status_changed"}
-          <div class="ev sys">Status → <b>{e.to}</b> by {e.by}{e.reason ? `: ${e.reason}` : ""}</div>
-        {:else if e.kind === "alarm"}
-          <div class="ev alarm" class:stop={e.action !== "warn"}>⚠ {e.message}{e.action !== "warn" ? ` → ${e.action}` : ""}</div>
-        {:else if e.kind === "paused"}
-          <div class="ev sys">Paused: {e.reason}</div>
-        {:else if e.kind === "resumed"}
-          <div class="ev sys">Resumed</div>
-        {:else if e.kind === "info"}
-          <div class="ev sys">{e.message}</div>
-        {:else if e.kind === "delivery_ready"}
-          <div class="ev note">Ready to deliver ({e.mode} to <code>{e.branch}</code>, {e.files.length} file{e.files.length === 1 ? "" : "s"}): approve in the banner or from the task.</div>
-        {:else if e.kind === "delivered"}
-          <div class="ended">Delivered to <code>{e.branch}</code>{e.commit ? ` · ${e.commit.slice(0, 8)}` : ""}{e.pushed ? " · pushed" : ""}{e.pr_url ? ` · ${e.pr_url}` : ""}</div>
-        {:else if e.kind === "session_ended"}
-          <div class="ended" class:err={!e.ok}>{e.ok ? "✓" : "■"} {e.summary}</div>
         {/if}
       {/each}
-    </section>
+    </div>
 
-    <form class="note-bar" onsubmit={submitNote}>
-      <input bind:value={note} placeholder="Note to the worker, delivered after its current step" disabled={!run.running} />
-      <button type="submit" disabled={!run.running || !note.trim()}>Send note</button>
+    <form class="composer" onsubmit={submitNote}>
+      <textarea
+        rows="1"
+        bind:value={note}
+        onkeydown={onKey}
+        placeholder={run.running ? "Message the agent — it reads it after its current step (Enter to send, Shift+Enter for a new line)" : "No agent is running"}
+        disabled={!run.running}
+      ></textarea>
+      <button type="submit" class="primary send" disabled={!run.running || !note.trim()} title="Send"><Icon name="send" size={14} /></button>
     </form>
-  </main>
+  {/if}
 </div>
 
 <style>
   .runview {
-    display: grid;
-    grid-template-columns: 320px 1fr;
+    display: flex;
+    flex-direction: column;
     height: 100%;
     min-height: 0;
   }
-  aside {
-    border-right: 1px solid var(--line);
-    background: var(--panel);
-    overflow: auto;
-  }
-  form {
+  .empty {
+    margin: auto;
+    text-align: center;
+    max-width: 380px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 16px;
-    box-sizing: border-box;
-    height: 100%;
-  }
-  h3 {
-    margin: 0;
-    font-size: 14px;
-  }
-  .in {
-    font-weight: 400;
+    align-items: center;
+    gap: 6px;
     color: var(--quiet);
   }
-  label {
+  .empty h2 {
+    margin: 6px 0 0;
+    font-size: 16px;
+    color: var(--ink);
+  }
+  .empty p {
+    margin: 0 0 10px;
+  }
+  .emptyicon {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    display: grid;
+    place-items: center;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .head {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 22px 10px;
+  }
+  .title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .slug {
+    font-weight: 650;
+    font-size: 15px;
+  }
+  .mode {
+    color: var(--quiet);
+  }
+  .stats {
+    display: flex;
+    gap: 14px;
+    margin-left: auto;
+    color: var(--quiet);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stats span {
+    display: inline-flex;
+    align-items: center;
     gap: 4px;
-    font-size: 12px;
-    color: var(--quiet);
   }
-  label.grow {
-    flex: 1;
-  }
-  .row {
-    display: grid;
-    grid-template-columns: 1fr 100px;
-    gap: 8px;
-  }
-  textarea {
-    flex: 1;
-    min-height: 140px;
-    resize: none;
-  }
-  .actions {
+  .ctl {
     display: flex;
-    gap: 8px;
+    gap: 6px;
   }
-  .hint {
-    font-size: 12px;
-    color: var(--quiet);
-    margin: 0;
-  }
-  main {
+  .trail {
     display: flex;
-    flex-direction: column;
-    min-height: 0;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 0 22px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .step {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 9px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 500;
+    background: color-mix(in srgb, var(--c) 10%, transparent);
+    color: var(--c);
+  }
+  .step.done {
+    color: var(--quiet);
+    background: var(--code-bg);
+  }
+  .step.bad {
+    color: var(--bad);
+    background: var(--bad-soft);
+  }
+  .link {
+    width: 14px;
+    height: 1px;
+    background: var(--line-strong);
+  }
+  .pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1.4s ease-in-out infinite;
   }
   .feed {
     flex: 1;
     overflow: auto;
-    padding: 12px 16px;
+    padding: 16px 22px 28px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 14px;
   }
-  .empty {
-    color: var(--quiet);
+  .feed > :global(*) {
+    flex-shrink: 0;
   }
-  .ev {
-    padding: 6px 10px;
-    border-radius: 6px;
-    background: var(--panel);
+  .agent {
     border: 1px solid var(--line);
-    overflow-wrap: anywhere;
-  }
-  .ev.text {
-    white-space: pre-wrap;
-  }
-  .ev.sys {
-    background: transparent;
-    border: none;
-    color: var(--quiet);
-    font-size: 12px;
-  }
-  .ev.note {
-    border-color: var(--accent);
-  }
-  .ev.error {
-    color: var(--bad);
-    white-space: pre-wrap;
-  }
-  .tool.err {
-    border-color: var(--bad);
-  }
-  .phase {
-    margin-top: 10px;
-    font-weight: 600;
-    font-size: 13px;
-    border-bottom: 1px solid var(--line);
-    padding-bottom: 4px;
-  }
-  .build pre {
-    margin: 6px 0 0;
-    font-size: 11.5px;
-    white-space: pre-wrap;
-    color: var(--quiet);
-  }
-  .build summary {
-    cursor: pointer;
-  }
-  .build.err {
-    border-color: var(--bad);
-  }
-  b.no {
-    color: var(--bad);
-  }
-  .ev.alarm {
-    border-color: #d99a2b;
-    background: var(--warn-bg);
-  }
-  .ev.alarm.stop {
-    border-color: var(--bad);
-  }
-  .ended {
-    padding: 8px 10px;
-    border-radius: 6px;
-    background: var(--accent-soft);
-    font-weight: 600;
-  }
-  .ended.err {
-    background: var(--warn-bg);
-  }
-  .tool-name {
-    font-weight: 600;
-    margin-right: 6px;
-  }
-  .badge {
-    font-size: 11px;
-    margin-left: 6px;
-    color: var(--good);
-  }
-  .badge.no {
-    color: var(--bad);
-  }
-  .result {
-    margin-top: 4px;
-    font-size: 12px;
-    color: var(--quiet);
-    white-space: pre-wrap;
-    max-height: 4.5em;
+    background: var(--panel);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
     overflow: hidden;
   }
-  .note-bar {
-    flex-direction: row;
-    height: auto;
-    gap: 8px;
-    padding: 10px 16px;
-    border-top: 1px solid var(--line);
-    background: var(--panel);
+  .agent header {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--c) 4%, var(--panel));
   }
-  .note-bar input {
+  .avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    background: var(--c);
+  }
+  .who {
+    font-weight: 600;
+  }
+  .round {
+    font-weight: 400;
+    color: var(--quiet);
+  }
+  .model {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--quiet);
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .cost {
+    margin-left: auto;
+    color: var(--quiet);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .working {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--c);
+  }
+  .items {
+    padding: 8px 14px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .msg {
+    padding: 6px 2px;
+  }
+  .tool {
+    border-radius: 7px;
+  }
+  .tool.waiting {
+    background: var(--warn-soft);
+  }
+  .trow {
+    all: unset;
+    box-sizing: border-box;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 7px;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .trow:hover {
+    background: var(--hover);
+  }
+  .trow.static {
+    cursor: default;
+  }
+  .ticon {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    flex: none;
+    background: var(--code-bg);
+    color: var(--quiet);
+  }
+  .tool.err .ticon {
+    background: var(--bad-soft);
+    color: var(--bad);
+  }
+  .verb {
+    font-weight: 600;
+    flex: none;
+  }
+  .target {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--quiet);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .dsize {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--good);
+    flex: none;
+  }
+  .right {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+  }
+  .state {
+    color: var(--good);
+    display: inline-flex;
+  }
+  .state.bad {
+    color: var(--bad);
+  }
+  .chev {
+    color: var(--faint);
+    display: inline-flex;
+    transition: transform 0.12s;
+  }
+  .chev.open {
+    transform: rotate(90deg);
+  }
+  .spinner {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-top-color: currentColor;
+    animation: spin 0.8s linear infinite;
+    color: var(--accent);
+    display: inline-block;
+  }
+  .nestwrap {
+    margin: 2px 0 4px 17px;
+    padding-left: 10px;
+    border-left: 2px solid var(--line);
+  }
+  .out,
+  .diff {
+    margin: 2px 0 6px 36px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--code-bg);
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 260px;
+    overflow: auto;
+  }
+  .out {
+    color: var(--quiet);
+  }
+  .out.bad {
+    color: var(--bad);
+    background: var(--bad-soft);
+  }
+  .diff {
+    padding: 6px 0;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .diff span {
+    display: block;
+    padding: 0 10px;
+  }
+  .diff .add {
+    background: color-mix(in srgb, var(--good) 13%, transparent);
+  }
+  .diff .del {
+    background: color-mix(in srgb, var(--bad) 13%, transparent);
+  }
+  .diff .more {
+    color: var(--faint);
+  }
+  .you {
+    align-self: flex-end;
+    max-width: 80%;
+    background: var(--accent);
+    color: #fff;
+    padding: 7px 12px;
+    border-radius: 12px 12px 4px 12px;
+    white-space: pre-wrap;
+    margin: 4px 0;
+  }
+  .youlabel {
+    display: block;
+    font-size: 10.5px;
+    opacity: 0.75;
+    font-weight: 600;
+  }
+  .callout {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--warn-soft);
+    color: var(--ink);
+  }
+  .callout :global(svg) {
+    margin-top: 2px;
+    color: var(--warn);
+  }
+  .callout.bad {
+    background: var(--bad-soft);
+  }
+  .callout.bad :global(svg) {
+    color: var(--bad);
+  }
+  .callout.good {
+    background: var(--good-soft);
+  }
+  .callout.good :global(svg) {
+    color: var(--good);
+  }
+  .callout.accent {
+    background: var(--accent-soft);
+  }
+  .callout.accent :global(svg) {
+    color: var(--accent);
+  }
+  .mark {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--quiet);
+    font-size: 12px;
+    padding: 2px 4px;
+  }
+  .mark.center {
+    justify-content: center;
+  }
+  .mark code {
+    font-size: 11px;
+  }
+  .system {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .build {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--good);
+    border-radius: 10px;
+    background: var(--panel);
+    padding: 4px 6px;
+  }
+  .build.bad {
+    border-left-color: var(--bad);
+  }
+  .bicon {
+    color: var(--good);
+    display: inline-flex;
+  }
+  .build.bad .bicon {
+    color: var(--bad);
+  }
+  .build code {
+    font-size: 11.5px;
+  }
+  .build .out {
+    margin-left: 6px;
+  }
+  .faint {
+    color: var(--faint);
+    font-size: 11.5px;
+  }
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--quiet);
+    font-size: 12px;
+  }
+  .divider::before,
+  .divider::after {
+    content: "";
     flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+  .ended {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--good-soft);
+    border: 1px solid color-mix(in srgb, var(--good) 30%, transparent);
+  }
+  .ended.bad {
+    background: var(--bad-soft);
+    border-color: color-mix(in srgb, var(--bad) 30%, transparent);
+  }
+  .eicon {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    background: var(--good);
+    flex: none;
+  }
+  .ended.bad .eicon {
+    background: var(--bad);
+  }
+  .composer {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+    margin: 0 22px 16px;
+    padding: 8px 8px 8px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--panel);
+    box-shadow: var(--shadow-md);
+  }
+  .composer:focus-within {
+    border-color: var(--accent);
+  }
+  .composer textarea {
+    flex: 1;
+    border: none;
+    box-shadow: none;
+    padding: 4px 0;
+    resize: none;
+    max-height: 160px;
+    field-sizing: content;
+    background: transparent;
+  }
+  .send {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: 8px;
   }
 </style>

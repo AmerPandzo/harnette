@@ -1,5 +1,16 @@
 <script lang="ts">
+  import Icon from "./Icon.svelte";
+  import { run } from "./run.svelte";
   import { COLUMNS, type StatusKind, type TaskSummary } from "./types";
+
+  const DOT: Record<string, string> = {
+    analysis: "var(--role-analyst)",
+    ready: "var(--accent)",
+    in_review: "var(--role-reviewer)",
+    changes_requested: "var(--bad)",
+    done: "var(--good)",
+    unknown: "var(--faint)",
+  };
 
   let {
     tasks,
@@ -21,32 +32,42 @@
 <div class="board">
   {#each columns as col (col.kind)}
     {@const items = tasks.filter((t) => t.status_kind === col.kind)}
-    <section class="col">
-      <h3>{col.label} <span class="count">{items.length}</span></h3>
-      {#each items as t (t.slug)}
-        <button class="card" class:sel={selected === t.slug} onclick={() => onselect(t.slug)}>
-          <span class="slug">{t.slug}</span>
-          <span class="title">{shortTitle(t)}</span>
-          <span class="chips">
-            {#if t.criteria_total > 0}
-              <span class="chip" title="Acceptance criteria met">✓ {t.criteria_done}/{t.criteria_total}</span>
-            {/if}
-            {#if t.open_questions > 0}
-              <span class="chip q" title="Open questions">? {t.open_questions}</span>
-            {/if}
-            {#if t.open_findings > 0}
-              <span class="chip" class:bad={t.blockers > 0} title="Open review findings ({t.blockers} Blocker)">
-                ⚑ {t.open_findings}{t.blockers > 0 ? ` · ${t.blockers} Blocker` : ""}
+    <section class="col" style="--dot: {DOT[col.kind]}">
+      <h3><span class="dot"></span>{col.label} <span class="count">{items.length}</span></h3>
+      <div class="cards">
+        {#each items as t (t.slug)}
+          {@const live = run.running && run.slug === t.slug}
+          <button class="card" class:sel={selected === t.slug} class:live onclick={() => onselect(t.slug)}>
+            <span class="slug">{t.slug}</span>
+            <span class="title">{shortTitle(t)}</span>
+            {#if live || t.criteria_total > 0 || t.open_questions > 0 || t.open_findings > 0 || col.kind === "unknown"}
+              <span class="chips">
+                {#if live}
+                  <span class="pill accent"><span class="pulse"></span>{run.asks.length ? "needs you" : run.paused ? "paused" : run.role || "running"}</span>
+                {/if}
+                {#if t.criteria_total > 0}
+                  <span class="chip" class:allok={t.criteria_done === t.criteria_total} title="Acceptance criteria met"
+                    ><Icon name="check" size={11} stroke={2.5} /> {t.criteria_done}/{t.criteria_total}</span
+                  >
+                {/if}
+                {#if t.open_questions > 0}
+                  <span class="chip q" title="Open questions"><Icon name="question" size={11} /> {t.open_questions}</span>
+                {/if}
+                {#if t.open_findings > 0}
+                  <span class="chip" class:bad={t.blockers > 0} title="Open review findings ({t.blockers} Blocker)">
+                    <Icon name="flag" size={11} /> {t.open_findings}{t.blockers > 0 ? ` · ${t.blockers} Blocker` : ""}
+                  </span>
+                {/if}
+                {#if col.kind === "unknown"}
+                  <span class="chip">{t.status || "no Status line"}</span>
+                {/if}
               </span>
             {/if}
-            {#if col.kind === "unknown"}
-              <span class="chip">{t.status || "no Status line"}</span>
-            {/if}
-          </span>
-        </button>
-      {:else}
-        <p class="empty">—</p>
-      {/each}
+          </button>
+        {:else}
+          <p class="empty">No tasks</p>
+        {/each}
+      </div>
     </section>
   {/each}
 </div>
@@ -54,53 +75,88 @@
 <style>
   .board {
     display: flex;
-    gap: 10px;
-    padding: 12px 16px;
-    overflow-x: auto;
+    gap: 12px;
+    padding: 4px 22px 16px;
+    overflow: auto;
     align-items: flex-start;
-    height: calc(100% - 24px);
+    height: 100%;
   }
   .col {
-    flex: 1 0 170px;
-    max-width: 280px;
+    flex: 1 0 190px;
+    max-width: 300px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: color-mix(in srgb, var(--ink) 2.5%, transparent);
+    border-radius: 12px;
+    padding: 10px 8px 8px;
+    min-height: 120px;
+  }
+  h3 {
+    margin: 0 4px 2px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--dot);
+  }
+  .count {
+    font-weight: 500;
+    color: var(--faint);
+  }
+  .cards {
     display: flex;
     flex-direction: column;
     gap: 8px;
   }
-  h3 {
-    margin: 0 0 2px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--quiet);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .count {
-    font-weight: 400;
-    margin-left: 4px;
-  }
   .card {
+    all: unset;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    text-align: left;
-    padding: 10px;
+    gap: 5px;
+    padding: 10px 12px;
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: 8px;
+    border-radius: 10px;
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    transition:
+      box-shadow 0.12s,
+      border-color 0.12s,
+      transform 0.12s;
+  }
+  .card:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateY(-1px);
+  }
+  .card:focus-visible {
+    border-color: var(--accent);
   }
   .card.sel {
     border-color: var(--accent);
-    background: var(--accent-soft);
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent),
+      var(--shadow-sm);
+  }
+  .card.live {
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
   }
   .slug {
-    font-family: ui-monospace, Menlo, monospace;
+    font-family: var(--mono);
     font-size: 11px;
     color: var(--quiet);
   }
   .title {
     font-weight: 600;
-    line-height: 1.3;
+    line-height: 1.35;
   }
   .chips {
     display: flex;
@@ -109,23 +165,38 @@
     margin-top: 2px;
   }
   .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     font-size: 11px;
-    padding: 1px 6px;
+    height: 19px;
+    padding: 0 6px;
     border-radius: 999px;
-    border: 1px solid var(--line);
+    background: var(--code-bg);
     color: var(--quiet);
+  }
+  .chip.allok {
+    background: var(--good-soft);
+    color: var(--good);
   }
   .chip.q {
-    color: var(--accent);
-    border-color: var(--accent);
+    background: color-mix(in srgb, var(--role-analyst) 12%, transparent);
+    color: var(--role-analyst);
   }
   .chip.bad {
+    background: var(--bad-soft);
     color: var(--bad);
-    border-color: var(--bad);
+  }
+  .pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1.4s ease-in-out infinite;
   }
   .empty {
-    color: var(--quiet);
-    margin: 0;
+    color: var(--faint);
+    margin: 4px;
     font-size: 12px;
   }
 </style>

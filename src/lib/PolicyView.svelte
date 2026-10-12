@@ -52,9 +52,7 @@
       <button class:on={mode === "screen"} onclick={() => setMode("screen")}>Screen</button>
       <button class:on={mode === "toml"} onclick={() => setMode("toml")}>TOML</button>
     </span>
-    <span class="meta">
-      <code>.ai-tasks/policy.toml</code> · every agent tool call is checked against it; agents cannot edit it.
-    </span>
+    <span class="meta">Agents cannot edit this file.</span>
   </div>
   {#if mode === "screen"}
     <PolicyForm {repo} onsaved={() => {}} />
@@ -87,21 +85,6 @@
     gap: 10px;
     padding: 8px 16px;
     border-bottom: 1px solid var(--line);
-  }
-  .seg {
-    display: inline-flex;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .seg button {
-    border: none;
-    border-radius: 0;
-    padding: 3px 12px;
-    font-size: 12px;
-  }
-  .seg button.on {
-    background: var(--accent-soft);
   }
   .policy {
     display: flex;

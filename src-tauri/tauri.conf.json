@@ -13,8 +13,12 @@
     "windows": [
       {
         "title": "Kormilant",
-        "width": 1100,
-        "height": 780
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

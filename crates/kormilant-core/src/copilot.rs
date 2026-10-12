@@ -261,7 +261,7 @@ fn on_update(inner: &Inner, update: &Value) {
             let id = update.get("toolCallId").and_then(Value::as_str).unwrap_or_default().to_string();
             let (tool, summary) = describe(update);
             let input = update.get("rawInput").cloned().unwrap_or(Value::Null);
-            (inner.emit)(RunEvent::ToolUse { id, tool, summary, input });
+            (inner.emit)(RunEvent::ToolUse { id, tool, summary, input, diff: None });
         }
         "tool_call_update" => {
             let status = update.get("status").and_then(Value::as_str).unwrap_or_default();

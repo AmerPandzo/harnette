@@ -4,6 +4,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import DOMPurify from "dompurify";
   import { marked } from "marked";
+  import Icon from "./Icon.svelte";
   import OpenInEditor from "./OpenInEditor.svelte";
   import QuestionsPane from "./QuestionsPane.svelte";
   import ReviewPane from "./ReviewPane.svelte";
@@ -136,50 +137,57 @@
 
 <div class="detail">
   <div class="bar">
-    <div class="head">
-      <span class="slug">{task.slug}</span>
-      <span class="seg">
-        <button class:on={view === "doc"} onclick={() => (view = "doc")}>Doc</button>
-        {#if showQuestions}
-          <button class:on={view === "questions"} onclick={() => (view = "questions")} disabled={editing}
-            >Questions{#if task.open_questions}<span class="count">{task.open_questions}</span>{/if}</button
-          >
-        {/if}
-        <button class:on={view === "review"} onclick={() => (view = "review")} disabled={editing}>Review</button>
-      </span>
-      <select value={task.status_kind} onchange={setStatus} disabled={editing} title="Status line in the doc">
+    <div class="titlerow">
+      <div class="titles">
+        <span class="slug">{task.slug}</span>
+        <span class="title">{task.title.replace(new RegExp(`^${task.slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[—:-]\\s*`), "")}</span>
+      </div>
+      <select class="status s-{task.status_kind}" value={task.status_kind} onchange={setStatus} disabled={editing} title="Status line in the doc">
         {#if task.status_kind === "unknown"}<option value="unknown" disabled>{task.status || "No status"}</option>{/if}
         {#each Object.entries(STATUS_LABELS) as [kind, label] (kind)}
           <option value={kind}>{label}</option>
         {/each}
       </select>
+      <button class="ghost icon" onclick={onclose} title="Close"><Icon name="x" size={15} /></button>
     </div>
-    <div class="actions">
-      {#if editing}
-        <button onclick={() => (editing = false)}>Cancel</button>
-        <button class="primary" onclick={save}>Save</button>
-      {:else}
-        {#if task.status_kind === "in_review"}
-          <input
-            class="base"
-            bind:value={base}
-            placeholder="vs. checkpoint"
-            title="Review against a branch or ref (e.g. develop) when the work is already committed. Empty = since the loop's first checkpoint."
-          />
+    <div class="toolrow">
+      <span class="seg">
+        <button class:on={view === "doc"} onclick={() => (view = "doc")}><Icon name="book" size={12} /> Doc</button>
+        {#if showQuestions}
+          <button class:on={view === "questions"} onclick={() => (view = "questions")} disabled={editing}
+            ><Icon name="question" size={12} /> Questions{#if task.open_questions}<span class="count">{task.open_questions}</span>{/if}</button
+          >
         {/if}
-        <button
-          class:primary={runnable}
-          onclick={() => onrun(task.status_kind === "in_review" ? base.trim() : "")}
-          disabled={busy || !runnable}
-          title="Implement → build → review until Done">Run</button
-        >
-        {#if task.status_kind === "done"}
-          <button onclick={ondeliver} disabled={busy} title="Commit, push or open a PR, per [delivery] in the policy">Deliver…</button>
+        <button class:on={view === "review"} onclick={() => (view = "review")} disabled={editing}><Icon name="eye" size={12} /> Review</button>
+      </span>
+      <div class="actions">
+        {#if editing}
+          <button onclick={() => (editing = false)}>Cancel</button>
+          <button class="primary" onclick={save}>Save</button>
+        {:else}
+          <OpenInEditor {repo} path={`.ai-tasks/${task.slug}.md`} />
+          <button onclick={edit} title="Edit the doc here"><Icon name="edit" size={13} /></button>
+          {#if task.status_kind === "done"}
+            <button onclick={ondeliver} disabled={busy} title="Commit, push or open a PR, per [delivery] in the policy"
+              ><Icon name="package" size={13} /> Deliver…</button
+            >
+          {/if}
+          {#if task.status_kind === "in_review"}
+            <input
+              class="base"
+              bind:value={base}
+              placeholder="vs. checkpoint"
+              title="Review against a branch or ref (e.g. develop) when the work is already committed. Empty = since the loop's first checkpoint."
+            />
+          {/if}
+          <button
+            class:primary={runnable}
+            onclick={() => onrun(task.status_kind === "in_review" ? base.trim() : "")}
+            disabled={busy || !runnable}
+            title="Implement → build → review until Done"><Icon name="run" size={12} /> Run</button
+          >
         {/if}
-        <OpenInEditor {repo} path={`.ai-tasks/${task.slug}.md`} />
-        <button onclick={edit}>Edit</button>
-        <button onclick={onclose} title="Close">✕</button>
-      {/if}
+      </div>
     </div>
   </div>
   {#if error}<p class="error pad">{error}</p>{/if}
@@ -209,6 +217,80 @@
 </div>
 
 <style>
+  .bar {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 18px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .titlerow {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .titles {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .slug {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--quiet);
+  }
+  .title {
+    font-size: 15px;
+    font-weight: 650;
+    line-height: 1.3;
+  }
+  .status {
+    height: 26px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0 10px;
+    border-color: transparent;
+    background: var(--code-bg);
+  }
+  .s-analysis {
+    color: var(--role-analyst);
+    background: color-mix(in srgb, var(--role-analyst) 12%, transparent);
+  }
+  .s-ready {
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+  }
+  .s-in_review {
+    color: var(--role-reviewer);
+    background: color-mix(in srgb, var(--role-reviewer) 13%, transparent);
+  }
+  .s-changes_requested {
+    color: var(--bad);
+    background: var(--bad-soft);
+  }
+  .s-done {
+    color: var(--good);
+    background: var(--good-soft);
+  }
+  .icon {
+    width: 28px;
+    padding: 0;
+  }
+  .toolrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .actions {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+    align-items: center;
+  }
   .detail {
     display: flex;
     flex-direction: column;
@@ -217,39 +299,6 @@
     background: var(--panel);
     border-left: 1px solid var(--line);
   }
-  .bar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--line);
-    flex-wrap: wrap;
-  }
-  .head {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .slug {
-    font-family: ui-monospace, Menlo, monospace;
-    font-weight: 600;
-  }
-  select {
-    padding: 4px 6px;
-  }
-  .seg {
-    display: inline-flex;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .seg button {
-    border: none;
-    border-radius: 0;
-    padding: 3px 10px;
-    font-size: 12px;
-  }
   .count {
     margin-left: 5px;
     padding: 0 5px;
@@ -257,13 +306,6 @@
     background: var(--accent);
     color: white;
     font-size: 10.5px;
-  }
-  .seg button.on {
-    background: var(--accent-soft);
-  }
-  .actions {
-    display: flex;
-    gap: 6px;
   }
   .cps {
     display: flex;

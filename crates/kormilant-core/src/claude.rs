@@ -383,7 +383,7 @@ where
                             }
                             // kormilant-guard decides allow/deny silently; mirror its verdict into the journal.
                             let guard_verdict = match &e {
-                                RunEvent::ToolUse { id, tool, summary, input } => {
+                                RunEvent::ToolUse { id, tool, summary, input, .. } => {
                                     match policy.evaluate_task(role, tool, input, &repo, &slug) {
                                         Verdict::Allow(rule) => Some((id.clone(), tool.clone(), summary.clone(), true, rule)),
                                         Verdict::Deny(rule) => Some((id.clone(), tool.clone(), summary.clone(), false, rule)),
