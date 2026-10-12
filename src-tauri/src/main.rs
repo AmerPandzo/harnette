@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    kormilant_lib::adopt_login_path();
     kormilant_lib::run()
 }

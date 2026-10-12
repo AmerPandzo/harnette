@@ -9,6 +9,7 @@ use kormilant_core::review::{Criterion, Finding, parse_criteria, parse_findings}
 use kormilant_core::tasks::{self, StatusKind, TaskSummary};
 use kormilant_core::watch::{TaskWatcher, watch_tasks};
 use kormilant_core::delivery::{self, Outcome, Plan};
+use kormilant_core::editor::{self, Editor};
 use kormilant_core::git::{self, Checkpoint};
 use kormilant_core::ledger::{self, Entry, Summary};
 use kormilant_core::watchdog::PriorUsage;
@@ -332,6 +333,17 @@ fn read_task(repo: String, slug: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn list_editors() -> Vec<Editor> {
+    editor::installed()
+}
+
+/// Opens a repo file (never one outside the repo) in one of the known editors.
+#[tauri::command]
+fn open_in_editor(repo: String, path: String, line: Option<u32>, editor: String) -> Result<(), String> {
+    editor::open(&expand_home(&repo), &path, line, &editor).map_err(err)
+}
+
+#[tauri::command]
 fn write_task(repo: String, slug: String, content: String) -> Result<(), String> {
     tasks::write(&expand_home(&repo), &slug, &content).map_err(err)
 }
@@ -389,6 +401,42 @@ fn save_policy_values(repo: String, values: serde_json::Value) -> Result<String,
     Ok(out)
 }
 
+/// An app started from Finder gets launchd's PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which has no
+/// `claude`, `copilot`, `mvn` or `docker`. Ask the user's login shell for its PATH and put it first.
+/// Call before any thread starts: it sets an environment variable.
+pub fn adopt_login_path() {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let Ok(mut child) = std::process::Command::new(&shell)
+        .args(["-ilc", "printf '\\n__KPATH__%s__KPATH__' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    // A shell profile that waits for input must not hang the app.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while matches!(child.try_wait(), Ok(None)) {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut out = String::new();
+    if let Some(mut so) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut so, &mut out);
+    }
+    let Some(login) = out.split("__KPATH__").nth(1) else { return };
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let merged: Vec<&str> = login.split(':').chain(current.split(':')).filter(|d| !d.is_empty() && seen.insert(*d)).collect();
+    // SAFETY: called from main before the Tauri runtime or any other thread exists.
+    unsafe { std::env::set_var("PATH", merged.join(":")) };
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -413,6 +461,8 @@ pub fn run() {
             watch_repo,
             list_tasks,
             read_task,
+            list_editors,
+            open_in_editor,
             write_task,
             set_task_status,
             read_policy,

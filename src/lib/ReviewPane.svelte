@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { editorName, openInEditor } from "./editor.svelte";
 
   type Finding = {
     id: string;
@@ -61,6 +62,31 @@
     return out;
   });
 
+  /** Where to open a changed file: the first changed line on the new side; null when the file was deleted. */
+  function firstLine(path: string): number | null {
+    const lines = filePatches.get(path) ?? [];
+    if (lines.includes("+++ /dev/null")) return null;
+    for (const l of lines) {
+      const m = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(l);
+      if (m) return Math.max(1, Number(m[1]));
+    }
+    return 1;
+  }
+
+  // Review findings cite code as `path:line`; make those references open the editor.
+  const REF = /([\w.\/-]+\.[\w]+):(\d+)/g;
+  function segments(text: string): ({ text: string } | { path: string; line: number; text: string })[] {
+    const out: ({ text: string } | { path: string; line: number; text: string })[] = [];
+    let last = 0;
+    for (const m of text.matchAll(REF)) {
+      if (m.index > last) out.push({ text: text.slice(last, m.index) });
+      out.push({ path: m[1], line: Number(m[2]), text: m[0] });
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) out.push({ text: text.slice(last) });
+    return out;
+  }
+
   const cls = (l: string) =>
     l.startsWith("+++") || l.startsWith("---")
       ? "meta"
@@ -105,7 +131,13 @@
             <span class="id">{f.id}</span>
             {#if f.severity}<span class="sev {f.severity.toLowerCase()}">{f.severity}</span>{/if}
             <span class="st">{stateOf(f)}</span>
-            <div class="ftext">{f.text}</div>
+            <div class="ftext">
+              {#each segments(f.text) as seg, i (i)}{#if "path" in seg}<button
+                    class="ref"
+                    title={`Open in ${editorName()}`}
+                    onclick={() => openInEditor(repo, seg.path, seg.line)}>{seg.text}</button
+                  >{:else}{seg.text}{/if}{/each}
+            </div>
             {#if f.fixed}<div class="fixed">Fixed: {f.fixed}</div>{/if}
           </div>
         {:else}
@@ -117,12 +149,19 @@
     <h4 class="pad">Changes <span class="meta">{data.files.length} file{data.files.length === 1 ? "" : "s"}{data.truncated ? " · diff truncated at 2 MB" : ""}</span></h4>
     {#each data.files as file (file.path)}
       <div class="file">
-        <button class="fhead" onclick={() => (open[file.path] = !open[file.path])}>
-          <span>{open[file.path] ? "▾" : "▸"}</span>
-          <code>{file.path}</code>
-          <span class="add">+{file.added}</span>
-          <span class="del">−{file.removed}</span>
-        </button>
+        <div class="frow">
+          <button class="fhead" onclick={() => (open[file.path] = !open[file.path])}>
+            <span>{open[file.path] ? "▾" : "▸"}</span>
+            <code>{file.path}</code>
+            <span class="add">+{file.added}</span>
+            <span class="del">−{file.removed}</span>
+          </button>
+          {#if firstLine(file.path) !== null}
+            <button class="ref open" title={`Open in ${editorName()} at the first change`} onclick={() => openInEditor(repo, file.path, firstLine(file.path) ?? undefined)}
+              >Open</button
+            >
+          {/if}
+        </div>
         {#if open[file.path]}
           <pre class="diff">{#each filePatches.get(file.path) ?? [] as line, i (i)}<span class={cls(line)}>{line}
 </span>{/each}</pre>
@@ -241,6 +280,29 @@
     border: 1px solid var(--line);
     border-radius: 6px;
     overflow: hidden;
+  }
+  .frow {
+    display: flex;
+    align-items: center;
+    background: var(--panel);
+  }
+  .ref {
+    border: none;
+    background: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 0.95em;
+    cursor: pointer;
+  }
+  .ref:hover {
+    text-decoration: underline;
+  }
+  .ref.open {
+    font-family: inherit;
+    font-size: 12px;
+    padding: 0 10px;
   }
   .fhead {
     display: flex;

@@ -1,7 +1,7 @@
 # Kormilant
 
 Local-first control plane for AI coding agents: task specs, enforced guardrails, a run journal, live allow/deny and steering.
-Phase 0 spike: one window that runs **Analyze** with Claude Code.
+Phase 1: task board, run loop (implement → build → review) on Claude Code or Copilot CLI, policy screen, watchdog, review pane, delivery.
 
 ## Layout
 
@@ -15,6 +15,15 @@ Phase 0 spike: one window that runs **Analyze** with Claude Code.
 npm install
 npm run tauri dev
 ```
+
+Packaged app (unsigned for distribution, ad-hoc signed for this Mac):
+
+```sh
+npm run tauri build                     # → target/release/bundle/macos/Kormilant.app
+ditto target/release/bundle/macos/Kormilant.app /Applications/Kormilant.app
+```
+
+`kormilant-guard` is bundled into `Contents/MacOS/`. Started from Finder, the app takes its PATH from your login shell, so `claude`, `copilot`, build tools and `docker` resolve as in a terminal.
 
 Terminal shell over the core (no GUI):
 

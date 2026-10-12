@@ -6,6 +6,7 @@ pub mod build;
 pub mod claude;
 pub mod copilot;
 pub mod delivery;
+pub mod editor;
 pub mod event;
 pub mod git;
 pub mod journal;

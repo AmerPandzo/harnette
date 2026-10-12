@@ -4,7 +4,9 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import DOMPurify from "dompurify";
   import { marked } from "marked";
+  import OpenInEditor from "./OpenInEditor.svelte";
   import ReviewPane from "./ReviewPane.svelte";
+  import { editors } from "./editor.svelte";
   import { STATUS_LABELS, type Checkpoint, type StatusKind, type TaskSummary } from "./types";
 
   let {
@@ -164,12 +166,14 @@
         {#if task.status_kind === "done"}
           <button onclick={ondeliver} disabled={busy} title="Commit, push or open a PR, per [delivery] in the policy">Deliver…</button>
         {/if}
+        <OpenInEditor {repo} path={`.ai-tasks/${task.slug}.md`} />
         <button onclick={edit}>Edit</button>
         <button onclick={onclose} title="Close">✕</button>
       {/if}
     </div>
   </div>
   {#if error}<p class="error pad">{error}</p>{/if}
+  {#if editors.error}<p class="error pad">{editors.error}</p>{/if}
   {#if changedOnDisk}<p class="warn">The doc changed on disk while you were editing. Saving overwrites that change.</p>{/if}
   {#if checkpoints.length > 0 && !editing}
     <div class="cps">
