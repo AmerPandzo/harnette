@@ -13,7 +13,7 @@
   import RunView from "$lib/RunView.svelte";
   import TaskDetail from "$lib/TaskDetail.svelte";
   import { initRunEvents, onRunExit, run, startLoop, startRun } from "$lib/run.svelte";
-  import { remember, remembered, type TaskSummary } from "$lib/types";
+  import { remember, remembered, type StatusKind, type TaskSummary } from "$lib/types";
 
   let repoInput = $state(remembered("kormilant.repo", ""));
   let repo = $state(""); // the watched, resolved repo
@@ -78,6 +78,19 @@
       tab = "run";
     } catch {
       tab = "run"; // the error shows in the Run view
+    }
+  }
+
+  async function moveTask(slug: string, status: StatusKind) {
+    // Show it in the new column right away; the file watcher confirms with the real doc.
+    const before = tasks;
+    tasks = tasks.map((t) => (t.slug === slug ? { ...t, status_kind: status } : t));
+    try {
+      await invoke("set_task_status", { repo, slug, status });
+      repoError = "";
+    } catch (e) {
+      tasks = before;
+      repoError = String(e);
     }
   }
 
@@ -189,7 +202,7 @@
           </div>
         {:else}
           <div class="boardview" class:split={selectedTask}>
-            <Board {tasks} {selected} onselect={(s) => (selected = selected === s ? null : s)} />
+            <Board {tasks} {selected} onselect={(s) => (selected = selected === s ? null : s)} onmove={moveTask} />
             {#if selectedTask}
               <TaskDetail
                 {repo}
