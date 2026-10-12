@@ -122,6 +122,18 @@ pub fn adopt_legacy_refs(repo: &Path) -> anyhow::Result<usize> {
     Ok(moved)
 }
 
+pub fn delivered_ref(slug: &str) -> String {
+    format!("refs/kormilant/{slug}/delivered")
+}
+
+/// Remember the working tree right after a delivery: the next delivery of the same task
+/// commits only what changed since then.
+pub fn mark_delivered(repo: &Path, slug: &str) -> anyhow::Result<()> {
+    let commit = snapshot(repo)?;
+    git(repo, ["update-ref", &delivered_ref(slug), &commit])?;
+    Ok(())
+}
+
 pub fn reviewed_ref(slug: &str) -> String {
     format!("refs/kormilant/{slug}/reviewed")
 }

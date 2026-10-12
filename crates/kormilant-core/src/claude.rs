@@ -263,7 +263,11 @@ fn sh_quote(s: &str) -> String {
 pub(crate) fn prompt_text(cfg: &RunConfig) -> String {
     match &cfg.mode {
         Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
-        Mode::Refine { message } => prompt::refine(&cfg.slug, message.as_deref()),
+        Mode::Refine { message } => {
+            let status = tasks::read(&cfg.repo, &cfg.slug).map(|md| tasks::parse(&cfg.slug, &md).status).unwrap_or_default();
+            let past = (tasks::StatusKind::of(&status) != tasks::StatusKind::Analysis).then_some(status.as_str());
+            prompt::refine(&cfg.slug, message.as_deref(), past)
+        }
         Mode::Implement { round, build_command } => prompt::implement(&cfg.slug, *round, build_command.as_deref()),
         Mode::Review { round, diff_path, build, changed_since_last_review } => {
             prompt::review(&cfg.slug, *round, diff_path, build.as_ref(), changed_since_last_review.as_deref())

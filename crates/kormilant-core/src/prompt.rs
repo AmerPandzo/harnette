@@ -43,10 +43,31 @@ Ticket:
     )
 }
 
-pub fn refine(slug: &str, message: Option<&str>) -> String {
+/// `past_analysis`: the task is already Ready / In review / Done, so code may exist; decisions that add
+/// work go into the plan and send the task back to Ready instead of rewriting it.
+pub fn refine(slug: &str, message: Option<&str>, past_analysis: Option<&str>) -> String {
     let message = match message.map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) => format!("\nThe human also wrote to you (treat it like an answer; it may add requirements or ask you something —\nreply to questions in your final message):\n\n{m}\n"),
         None => String::new(),
+    };
+    let update = match past_analysis {
+        None => r#"- Re-check the repository where an answer changes the picture, and update Analysis, Conclusion,
+  Proposed fix and Acceptance criteria to match the decisions.
+- Unanswered questions stay open with their options. Add new questions (with `   - Option:` sub-items)
+  only if the answers raise them.
+- Set the Status line to `**Status:** Ready for implementation` when no open questions block implementation,
+  otherwise keep `**Status:** Analysis`."#
+            .to_string(),
+        Some(status) => format!(
+            r#"- The task is past analysis (Status: {status}): the Proposed fix may already be implemented (see
+  Implementation notes and the code). Do not rewrite or renumber existing steps or criteria.
+- If a decision (or the message) needs code changes that are not done yet: check the repository, append
+  new numbered steps to Proposed fix, each ending with `(added after decision <n>)` or `(added on request)`,
+  append matching `- [ ]` Acceptance criteria, widen Out of scope / constraints if it excluded this work,
+  and set the Status line to `**Status:** Ready for implementation`.
+- If no decision needs a code change, keep the Status line as it is.
+- Do not edit Implementation notes or the Review log."#
+        ),
     };
     format!(
         r#"You are the Analyst in a Kormilant run, continuing an analysis. Analysis only: do not modify any source file.
@@ -58,19 +79,14 @@ written right after the question instead.
 Update the doc in place:
 - For each answered question, replace its answer and option lines with one `**Decided:** <answer>` line
   under the question, and keep it in Open questions.
-- Re-check the repository where an answer changes the picture, and update Analysis, Conclusion,
-  Proposed fix and Acceptance criteria to match the decisions.
-- Unanswered questions stay open with their options. Add new questions (with `   - Option:` sub-items)
-  only if the answers raise them.
-- Set the Status line to `**Status:** Ready for implementation` when no open questions block implementation,
-  otherwise keep `**Status:** Analysis`.
+{update}
 - Keep every other section and the overall format unchanged.
 
 Rules:
 - Run one plain command per Bash call: no pipes, `&&`, `;`, redirects or subshells.
 - Never run git commands that change state (commit, push, reset, stash, checkout, rebase).
 - If a tool call is denied, read the reason and continue without it.
-- Finish with one sentence per decision you applied, then answer anything the human asked.
+- Finish with one sentence per decision you applied (and whether it added work), then answer anything the human asked.
 "#
     )
 }
@@ -91,7 +107,8 @@ pub fn implement(slug: &str, round: u32, build_command: Option<&str>) -> String 
 Read `.ai-tasks/{slug}.md` and implement it:
 - If the Review log has open findings (`- [ ] R<N>-<k> …`), fix each one. After fixing one, tick it (`- [x]`)
   and add an indented line right under it: `  Fixed: <what you changed>`. Skip findings already marked Verified.
-- Otherwise implement the Proposed fix, step by step, within the task's scope.
+- Otherwise implement the Proposed fix, step by step, within the task's scope. Steps may already be done
+  (see Implementation notes and the code): do only what is missing, such as steps marked `(added after decision <n>)`.
 - Update the `## Implementation notes` section: what you changed, where, and where you deviated from the plan and why.
 - Do not change the `**Status:**` line. Kormilant sets it.
 - Do not edit `.ai-tasks/policy.toml` or anything under `.ai-tasks/runs/`.

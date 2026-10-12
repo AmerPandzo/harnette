@@ -274,21 +274,38 @@ pub fn questions(md: &str) -> Vec<Question> {
         .enumerate()
         .map(|(index, (start, end))| {
             let mut text = vec![list_item(lines[start]).unwrap_or_default().trim().to_string()];
-            let (mut decided, mut answer, mut options) = (None, None::<String>, vec![]);
+            let (mut decided, mut answer, mut options) = (None, None::<String>, Vec::<String>::new());
+            // Where a wrapped continuation line belongs: the question text, the last option, or the answer.
+            enum Last {
+                Text,
+                Option,
+                Answer,
+            }
+            let mut last = Last::Text;
             for l in &lines[start + 1..end] {
                 let t = l.trim();
                 let plain = t.replace("**", "");
                 if let Some(o) = list_item(l).and_then(|r| r.strip_prefix("Option:").or_else(|| r.strip_prefix("**Option:**"))) {
                     options.push(o.trim().to_string());
+                    last = Last::Option;
                 } else if let Some(a) = plain.strip_prefix("Answer:") {
                     answer = Some(a.trim().to_string());
+                    last = Last::Answer;
                 } else if plain.to_lowercase().starts_with("decided") {
                     decided = Some(clean(&plain[plain.find(':').map_or(7, |i| i + 1)..]));
-                } else if let Some(a) = answer.as_mut() {
-                    a.push('\n');
-                    a.push_str(t);
+                    last = Last::Text;
                 } else {
-                    text.push(t.to_string());
+                    match (&last, options.last_mut(), answer.as_mut()) {
+                        (Last::Option, Some(o), _) => {
+                            o.push(' ');
+                            o.push_str(t);
+                        }
+                        (Last::Answer, _, Some(a)) => {
+                            a.push('\n');
+                            a.push_str(t);
+                        }
+                        _ => text.push(t.to_string()),
+                    }
                 }
             }
             // "1. ~~Part B now?~~ **Decided:** do it" keeps the decision on the question's own line.
@@ -411,7 +428,7 @@ mod tests {
         fs::remove_dir_all(&repo).unwrap();
     }
 
-    const QS: &str = "# T\n\n## Open questions\n\n1. How many decimals?\n   - Option: 2\n   - Option: none, keep full precision\n2. ~~Part B now?~~ **Decided:** do it here.\n3. What should percent(1, 0) do?\n   More context on the second line.\n   **Answer:** throw\n   a RangeError\n\n## Implementation notes\n";
+    const QS: &str = "# T\n\n## Open questions\n\n1. How many decimals?\n   - Option: 2\n   - Option: none, keep full\n     precision\n2. ~~Part B now?~~ **Decided:** do it here.\n3. What should percent(1, 0) do?\n   More context on the second line.\n   **Answer:** throw\n   a RangeError\n\n## Implementation notes\n";
 
     #[test]
     fn parses_questions() {

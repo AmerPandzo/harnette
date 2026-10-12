@@ -178,7 +178,10 @@ pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
             bail!("Files changed after the last green build; run the loop again so the delivered code is the code that was built.");
         }
     }
+    // Changes since the task started, or since its last delivery when it came back for more work.
+    let delivered = git::delivered_ref(slug);
     let base = match git::list_checkpoints(repo, slug)?.first() {
+        _ if git::resolve(repo, &delivered).is_some() => delivered,
         Some(c) => c.git_ref.clone(),
         None => git::head(repo)?.context("no commits yet")?,
     };
@@ -263,6 +266,7 @@ pub fn execute(repo: &Path, plan: &Plan) -> anyhow::Result<Outcome> {
     let mut reset = vec!["reset", "-q", "--"];
     reset.extend(plan.files.iter().map(String::as_str));
     user_git(repo, &reset)?;
+    git::mark_delivered(repo, &plan.slug)?;
     outcome.commit = Some(commit);
     if plan.mode == "push" || plan.mode == "pr" {
         user_git(repo, &["push", "-u", "origin", &plan.branch])?;
@@ -390,6 +394,27 @@ mod tests {
         assert_eq!((p.branch.as_str(), p.create_branch), ("feature/x", false));
         execute(&repo, &p).unwrap();
         assert_eq!(current_branch(&repo).as_deref(), Some("feature/x"));
+        fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn a_second_delivery_commits_only_the_new_work() {
+        let repo = setup("again", DONE);
+        user_git(&repo, &["switch", "-q", "-c", "feature/x"]).unwrap();
+        let pol = policy(DeliveryMode::Commit, None);
+        execute(&repo, &plan(&repo, "T-1", &pol).unwrap()).unwrap();
+        assert!(plan(&repo, "T-1", &pol).unwrap_err().to_string().contains("Nothing to deliver"));
+
+        // The task came back (a decision added work) and the agent changed a.txt again.
+        fs::write(repo.join("a.txt"), "fixed\nand more\n").unwrap();
+        let p = plan(&repo, "T-1", &pol).unwrap();
+        assert_eq!(p.files, ["a.txt"]);
+        assert!(p.base.ends_with("/delivered"));
+        let second = execute(&repo, &p).unwrap().commit.unwrap();
+        let diff = user_git(&repo, &["show", "--format=", &second]).unwrap();
+        assert!(diff.contains("+and more") && !diff.contains("+fixed"), "{diff}");
+        assert_eq!(fs::read_to_string(repo.join("mine.txt")).unwrap(), "user work\n", "the user's own work stays uncommitted");
+        assert!(user_git(&repo, &["status", "--porcelain"]).unwrap().contains("mine.txt"));
         fs::remove_dir_all(&repo).unwrap();
     }
 

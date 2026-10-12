@@ -54,7 +54,10 @@
   let changed = $derived(open.filter((q) => (drafts[q.text] ?? "").trim() !== (q.answer ?? "").trim()));
   let answered = $derived(open.filter((q) => (drafts[q.text] ?? "").trim()));
 
+  // Agent-written text: sanitize before it reaches the webview.
   const inline = (md: string) => DOMPurify.sanitize(marked.parseInline(md, { async: false }) as string);
+  /** Paragraphs, with the doc's hard-wrapped lines joined. */
+  const block = (md: string) => DOMPurify.sanitize(marked.parse(md, { async: false }) as string);
 
   function pick(q: Question, option: string) {
     drafts[q.text] = drafts[q.text]?.trim() === option ? "" : option;
@@ -90,7 +93,7 @@
 
   {#each open as q, n (q.index)}
     <div class="q">
-      <div class="qtext"><span class="num">{n + 1}</span><span>{@html inline(q.text)}</span></div>
+      <div class="qtext"><span class="num">{n + 1}</span><div class="qbody">{@html block(q.text)}</div></div>
       {#if q.options.length}
         <div class="opts">
           {#each q.options as o, i (i)}
@@ -118,7 +121,6 @@
     </details>
   {/if}
 
-  {#if analysis}
   <label class="msg">
     Message to the analyst <span class="quiet">(optional: extra requirements, corrections, or a question)</span>
     <textarea rows="3" bind:value={message} placeholder="e.g. Also check the export path; keep the API unchanged." disabled={busy}></textarea>
@@ -137,19 +139,14 @@
     </button>
   </div>
   <p class="hint">
-    Answers go into the doc under each question. The analyst marks them <b>Decided</b>, updates the plan, and moves the task to
-    Ready when nothing blocks implementation.
+    {#if analysis}
+      Answers go into the doc under each question. The analyst marks them <b>Decided</b>, updates the plan, and moves the task
+      to Ready when nothing blocks implementation.
+    {:else}
+      The analyst marks the answers <b>Decided</b>. If one adds work, it appends steps to the plan and moves the task back to
+      <b>Ready</b>, so <b>Run</b> implements just the new part and the reviewer checks it. Otherwise the status stays.
+    {/if}
   </p>
-  {:else}
-  <div class="actions">
-    {#if saved}<span class="quiet">{saved}</span>{/if}
-    <button class="primary" onclick={save} disabled={busy || changed.length === 0}>Save answers</button>
-  </div>
-  <p class="hint">
-    Past analysis: answers are saved into the doc, where the implementer reads them. To have the analyst rework the plan, set the
-    status back to <b>Analysis</b>.
-  </p>
-  {/if}
 </div>
 
 <style>
@@ -174,7 +171,14 @@
     display: flex;
     gap: 8px;
     line-height: 1.45;
-    white-space: pre-line;
+  }
+  .qbody :global(p) {
+    margin: 0 0 4px;
+  }
+  .opt :global(code) {
+    background: none;
+    padding: 0;
+    color: inherit;
   }
   .num {
     flex: none;
