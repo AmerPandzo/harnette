@@ -118,6 +118,7 @@
     </details>
   {/if}
 
+  {#if analysis}
   <label class="msg">
     Message to the analyst <span class="quiet">(optional: extra requirements, corrections, or a question)</span>
     <textarea rows="3" bind:value={message} placeholder="e.g. Also check the export path; keep the API unchanged." disabled={busy}></textarea>
@@ -129,8 +130,8 @@
     <button
       class="primary"
       onclick={send}
-      disabled={busy || !analysis || (answered.length === 0 && !message.trim())}
-      title={analysis ? "Save the answers, then the analyst turns them into decisions and updates the plan" : "Only while the task is in Analysis"}
+      disabled={busy || (answered.length === 0 && !message.trim())}
+      title="Save the answers, then the analyst turns them into decisions and updates the plan"
     >
       Send to analyst
     </button>
@@ -139,6 +140,16 @@
     Answers go into the doc under each question. The analyst marks them <b>Decided</b>, updates the plan, and moves the task to
     Ready when nothing blocks implementation.
   </p>
+  {:else}
+  <div class="actions">
+    {#if saved}<span class="quiet">{saved}</span>{/if}
+    <button class="primary" onclick={save} disabled={busy || changed.length === 0}>Save answers</button>
+  </div>
+  <p class="hint">
+    Past analysis: answers are saved into the doc, where the implementer reads them. To have the analyst rework the plan, set the
+    status back to <b>Analysis</b>.
+  </p>
+  {/if}
 </div>
 
 <style>
