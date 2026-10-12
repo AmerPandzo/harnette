@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use kormilant_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
 use kormilant_core::review::{Criterion, Finding, parse_criteria, parse_findings};
-use kormilant_core::tasks::{self, StatusKind, TaskSummary};
+use kormilant_core::tasks::{self, Question, StatusKind, TaskSummary};
 use kormilant_core::watch::{TaskWatcher, watch_tasks};
 use kormilant_core::delivery::{self, Outcome, Plan};
 use kormilant_core::editor::{self, Editor};
@@ -108,6 +108,7 @@ fn err(e: anyhow::Error) -> String {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // one per command argument from the UI
 async fn start_run(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -116,13 +117,14 @@ async fn start_run(
     mode: String,
     ticket: Option<String>,
     model: Option<String>,
+    message: Option<String>,
 ) -> Result<(), String> {
     if busy(&state) {
         return Err("A run is already in progress.".into());
     }
     let mode = match mode.as_str() {
         "analyze" => Mode::Analyze { ticket: ticket.unwrap_or_default() },
-        "refine" => Mode::Refine,
+        "refine" => Mode::Refine { message },
         other => return Err(format!("unknown run mode {other:?}")),
     };
     let repo = expand_home(repo.trim());
@@ -333,6 +335,17 @@ fn read_task(repo: String, slug: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn task_questions(repo: String, slug: String) -> Result<Vec<Question>, String> {
+    Ok(tasks::questions(&tasks::read(&expand_home(&repo), &slug).map_err(err)?))
+}
+
+/// Writes answers given in the app under their questions in the doc. `answers`: (question index, text).
+#[tauri::command]
+fn save_answers(repo: String, slug: String, answers: Vec<(usize, String)>) -> Result<(), String> {
+    tasks::save_answers(&expand_home(&repo), &slug, &answers).map_err(err)
+}
+
+#[tauri::command]
 fn list_editors() -> Vec<Editor> {
     editor::installed()
 }
@@ -462,6 +475,8 @@ pub fn run() {
             list_tasks,
             read_task,
             list_editors,
+            task_questions,
+            save_answers,
             open_in_editor,
             write_task,
             set_task_status,

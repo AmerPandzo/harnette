@@ -105,9 +105,11 @@ async function guarded(f: () => Promise<unknown>) {
   }
 }
 
-export async function startRun(args: { repo: string; slug: string; mode: "analyze" | "refine"; ticket?: string; model?: string }) {
+export async function startRun(args: { repo: string; slug: string; mode: "analyze" | "refine"; ticket?: string; model?: string; message?: string }) {
   begin(args.slug, args.mode);
-  await guarded(() => invoke("start_run", { ...args, ticket: args.ticket ?? null, model: args.model || null }));
+  await guarded(() =>
+    invoke("start_run", { ...args, ticket: args.ticket ?? null, model: args.model || null, message: args.message?.trim() || null }),
+  );
 }
 
 export async function startLoop(args: { repo: string; slug: string; model?: string; base?: string }) {

@@ -119,6 +119,33 @@ fn quote(s: &str) -> String {
     }
 }
 
+/// With `branch_at_start`, put the work on the task branch before the first edit: from a protected or
+/// detached HEAD, switch to `delivery.branch` (creating it at HEAD if needed). Uncommitted changes come along.
+/// Returns what was done, or None when nothing needed doing.
+pub fn start_branch(repo: &Path, slug: &str, d: &Delivery) -> anyhow::Result<Option<String>> {
+    if !d.branch_at_start {
+        return Ok(None);
+    }
+    let current = current_branch(repo);
+    if let Some(b) = &current
+        && !is_protected(b, &d.protected)
+    {
+        return Ok(None);
+    }
+    let branch = d.branch.replace("{slug}", slug);
+    if is_protected(&branch, &d.protected) {
+        bail!("delivery.branch {branch} is protected; set a non-protected name.");
+    }
+    let from = current.unwrap_or_else(|| "a detached HEAD".into());
+    if branch_exists(repo, &branch) {
+        user_git(repo, &["switch", &branch]).with_context(|| format!("could not switch to the existing task branch {branch}"))?;
+        Ok(Some(format!("Switched from {from} to the existing task branch {branch}.")))
+    } else {
+        user_git(repo, &["switch", "-c", &branch])?;
+        Ok(Some(format!("Created task branch {branch} from {from} and switched to it; uncommitted changes came along.")))
+    }
+}
+
 /// Checks the gate and works out what delivery would do, without changing anything.
 pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
     let d: &Delivery = &policy.delivery;
@@ -291,6 +318,26 @@ mod tests {
     fn green(repo: &Path, command: &str) {
         let tree = git::tree_of(repo, &git::snapshot(repo).unwrap()).unwrap();
         record_build(repo, "T-1", &LastBuild { ok: true, command: command.into(), tree, ts_ms: 0 }).unwrap();
+    }
+
+    #[test]
+    fn branch_at_start_moves_work_off_a_protected_branch() {
+        let repo = setup("start", DONE);
+        user_git(&repo, &["branch", "-M", "develop"]).unwrap();
+        let mut d = Policy::default().delivery;
+        assert_eq!(start_branch(&repo, "T-1", &d).unwrap(), None, "off by default");
+        d.branch_at_start = true;
+        let msg = start_branch(&repo, "T-1", &d).unwrap().unwrap();
+        assert!(msg.contains("Created task branch ai/T-1 from develop"), "{msg}");
+        assert_eq!(current_branch(&repo).as_deref(), Some("ai/T-1"));
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "fixed\n", "uncommitted work came along");
+        assert_eq!(start_branch(&repo, "T-1", &d).unwrap(), None, "already on a non-protected branch");
+        user_git(&repo, &["switch", "develop"]).unwrap();
+        assert!(start_branch(&repo, "T-1", &d).unwrap().unwrap().contains("existing task branch ai/T-1"));
+        d.branch = "release/{slug}".into();
+        user_git(&repo, &["switch", "develop"]).unwrap();
+        assert!(start_branch(&repo, "T-1", &d).is_err(), "never a protected task branch");
+        fs::remove_dir_all(&repo).unwrap();
     }
 
     #[test]

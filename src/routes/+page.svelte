@@ -66,10 +66,10 @@
     if (typeof picked === "string") await connect(picked);
   }
 
-  async function refine() {
+  async function refine(message = "") {
     if (!selectedTask) return;
     try {
-      await startRun({ repo, slug: selectedTask.slug, mode: "refine", model: remembered("kormilant.model", "") });
+      await startRun({ repo, slug: selectedTask.slug, mode: "refine", model: remembered("kormilant.model", ""), message });
       tab = "run";
     } catch {
       tab = "run"; // the error shows in the Run view

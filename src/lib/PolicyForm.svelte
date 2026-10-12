@@ -18,7 +18,7 @@
     };
     build: { command: string | null; requires: string[] };
     run: { max_rounds: number };
-    delivery: { mode: "none" | "commit" | "push" | "pr"; approval: "ask" | "auto"; branch: string; protected: string[] };
+    delivery: { mode: "none" | "commit" | "push" | "pr"; approval: "ask" | "auto"; branch: string; protected: string[]; branch_at_start: boolean };
     copilot: { model: string; instructions: string; excluded_tools: string[] };
   };
   type FormData = {
@@ -292,10 +292,21 @@
 
     <section>
       <h3>Git, reach and edits</h3>
-      <p class="hint">Git commands agents may never run (Kormilant does delivery itself):</p>
+      <p class="hint">
+        Git commands agents <b>may</b> run (unticked = blocked). Branches and commits are the app's job, not the agent's:
+        see <b>Delivery</b> below.
+      </p>
       <div class="verbs">
         {#each gitVerbs as v (v)}
-          <label class="verb"><input type="checkbox" checked={form.git.deny.includes(v)} onchange={() => toggleVerb(v)} /> {v}</label>
+          {#if v === "push"}
+            <label class="verb blocked" title="Never: only the app pushes, after you approve delivery"
+              ><input type="checkbox" disabled /> push</label
+            >
+          {:else}
+            <label class="verb" class:blocked={form.git.deny.includes(v)}
+              ><input type="checkbox" checked={!form.git.deny.includes(v)} onchange={() => toggleVerb(v)} /> {v}</label
+            >
+          {/if}
         {/each}
       </div>
       <div class="row">
@@ -391,14 +402,20 @@
           pr: "PR",
         })}
       </div>
+      <div class="row">
+        <span class="name">Task branch</span>
+        <input class="grow mono" bind:value={form.delivery.branch} />
+      </div>
+      <div class="row">
+        <span class="name"></span>
+        <label class="name wide"
+          ><input type="checkbox" bind:checked={form.delivery.branch_at_start} /> Switch to it when a run starts (from a protected branch like develop)</label
+        >
+      </div>
       {#if form.delivery.mode !== "none"}
         <div class="row">
           <span class="name">Approval</span>
           {@render seg(form.delivery.approval, ["ask", "auto"], (v) => (form!.delivery.approval = v))}
-        </div>
-        <div class="row">
-          <span class="name">Task branch</span>
-          <input class="grow mono" bind:value={form.delivery.branch} />
         </div>
       {/if}
       <p class="hint">Never touched (globs allowed):</p>
@@ -578,6 +595,15 @@
     gap: 3px;
     align-items: center;
     min-width: 92px;
+  }
+  .verb.blocked {
+    color: var(--bad);
+    text-decoration: line-through;
+    text-decoration-color: color-mix(in srgb, var(--bad) 50%, transparent);
+  }
+  .name.wide {
+    width: auto;
+    font-weight: 400;
   }
   .pack {
     font-size: 12px;

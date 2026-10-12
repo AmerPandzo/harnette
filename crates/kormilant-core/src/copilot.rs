@@ -347,7 +347,7 @@ pub fn args(cfg: &RunConfig, policy: &Policy) -> Vec<String> {
         args.extend(["--excluded-tools".into(), tool.clone()]);
     }
     // Denied even if Copilot would not ask (its own allow rules or auto-approved commands).
-    for verb in &policy.git.deny {
+    for verb in policy.git.denied() {
         args.extend(["--deny-tool".into(), format!("shell(git {verb})")]);
     }
     args
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn args_deny_git_verbs_and_never_allow_all() {
-        let cfg = RunConfig::new("/tmp", "x", crate::claude::Mode::Refine);
+        let cfg = RunConfig::new("/tmp", "x", crate::claude::Mode::Refine { message: None });
         let a = args(&cfg, &Policy::default()).join(" ");
         assert!(a.contains("--deny-tool shell(git push)"));
         assert!(a.contains("--model claude-sonnet-5"), "policy default when the role names no model");

@@ -26,8 +26,9 @@ use crate::tasks;
 pub enum Mode {
     /// First analysis of a ticket: writes the task doc.
     Analyze { ticket: String },
-    /// Continue an analysis after the human answered Open questions in the doc.
-    Refine,
+    /// Continue an analysis after the human answered Open questions (in the app or the doc),
+    /// optionally with a free-form message.
+    Refine { message: Option<String> },
     /// Implement the Proposed fix or the open review findings.
     Implement { round: u32, build_command: Option<String> },
     /// Fresh-session review of the change against the task doc.
@@ -45,7 +46,7 @@ pub struct BuildSummary {
 impl Mode {
     pub fn role(&self) -> Role {
         match self {
-            Mode::Analyze { .. } | Mode::Refine => Role::Analyst,
+            Mode::Analyze { .. } | Mode::Refine { .. } => Role::Analyst,
             Mode::Implement { .. } => Role::Implementer,
             Mode::Review { .. } => Role::Reviewer,
         }
@@ -214,7 +215,7 @@ pub(crate) fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
     }
     match &cfg.mode {
         Mode::Analyze { ticket } if ticket.trim().is_empty() => bail!("ticket text is empty"),
-        Mode::Refine | Mode::Implement { .. } | Mode::Review { .. } if tasks::read(&cfg.repo, &cfg.slug).is_err() => {
+        Mode::Refine { .. } | Mode::Implement { .. } | Mode::Review { .. } if tasks::read(&cfg.repo, &cfg.slug).is_err() => {
             bail!("no task doc .ai-tasks/{}.md", cfg.slug)
         }
         _ => Ok(()),
@@ -262,7 +263,7 @@ fn sh_quote(s: &str) -> String {
 pub(crate) fn prompt_text(cfg: &RunConfig) -> String {
     match &cfg.mode {
         Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
-        Mode::Refine => prompt::refine(&cfg.slug),
+        Mode::Refine { message } => prompt::refine(&cfg.slug, message.as_deref()),
         Mode::Implement { round, build_command } => prompt::implement(&cfg.slug, *round, build_command.as_deref()),
         Mode::Review { round, diff_path, build, changed_since_last_review } => {
             prompt::review(&cfg.slug, *round, diff_path, build.as_ref(), changed_since_last_review.as_deref())

@@ -22,9 +22,14 @@ Use exactly these sections:
 ## Acceptance criteria (testable `- [ ]` checklist)
 ## Test plan
 ## Out of scope / constraints
-## Open questions      (for the human)
+## Open questions      (for the human; numbered, see below)
 ## Implementation notes
 ## Review log
+
+Open questions: one numbered item per question, each a single question the human can answer in a sentence.
+Under each, list 2–4 likely answers as sub-items `   - Option: <answer>` (your recommended one first),
+so the human can pick one in the app. Write `None.` when there are no questions.
+If no question blocks implementation, set the Status to `**Status:** Ready for implementation`.
 
 Rules:
 - Run one plain command per Bash call: no pipes, `&&`, `;`, redirects or subshells.
@@ -38,19 +43,26 @@ Ticket:
     )
 }
 
-pub fn refine(slug: &str) -> String {
+pub fn refine(slug: &str, message: Option<&str>) -> String {
+    let message = match message.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => format!("\nThe human also wrote to you (treat it like an answer; it may add requirements or ask you something —\nreply to questions in your final message):\n\n{m}\n"),
+        None => String::new(),
+    };
     format!(
         r#"You are the Analyst in a Kormilant run, continuing an analysis. Analysis only: do not modify any source file.
 
-Read `.ai-tasks/{slug}.md`. The human has answered some Open questions directly in the doc
-(an answer follows the question on the same line, or is written under it).
-
+Read `.ai-tasks/{slug}.md`. The human answered Open questions in the app: an answer is the `**Answer:** …` line
+(possibly continued on the following indented lines) under its question. Older docs may have the answer
+written right after the question instead.
+{message}
 Update the doc in place:
-- Mark each answered question as `Decided: <answer>` and keep it in Open questions.
+- For each answered question, replace its answer and option lines with one `**Decided:** <answer>` line
+  under the question, and keep it in Open questions.
 - Re-check the repository where an answer changes the picture, and update Analysis, Conclusion,
   Proposed fix and Acceptance criteria to match the decisions.
-- Unanswered questions stay open. Add new questions only if the answers raise them.
-- Set the Status line to `**Status:** Ready for implementation` when no open questions remain,
+- Unanswered questions stay open with their options. Add new questions (with `   - Option:` sub-items)
+  only if the answers raise them.
+- Set the Status line to `**Status:** Ready for implementation` when no open questions block implementation,
   otherwise keep `**Status:** Analysis`.
 - Keep every other section and the overall format unchanged.
 
@@ -58,7 +70,7 @@ Rules:
 - Run one plain command per Bash call: no pipes, `&&`, `;`, redirects or subshells.
 - Never run git commands that change state (commit, push, reset, stash, checkout, rebase).
 - If a tool call is denied, read the reason and continue without it.
-- Finish with one sentence per decision you applied.
+- Finish with one sentence per decision you applied, then answer anything the human asked.
 "#
     )
 }

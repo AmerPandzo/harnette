@@ -187,6 +187,18 @@ pub struct Git {
     pub deny: Vec<String>,
 }
 
+/// Git verbs agents can never run, whatever `[git] deny` says: pushing is the app's job, after approval.
+pub const ALWAYS_DENIED_GIT: &[&str] = &["push"];
+
+impl Git {
+    /// `deny` plus the verbs that cannot be lifted.
+    pub fn denied(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = ALWAYS_DENIED_GIT.to_vec();
+        v.extend(self.deny.iter().map(String::as_str).filter(|d| !ALWAYS_DENIED_GIT.contains(d)));
+        v
+    }
+}
+
 impl Default for Git {
     fn default() -> Self {
         let verbs = ["push", "commit", "reset", "stash", "checkout", "rebase", "merge", "switch", "restore", "clean"];
@@ -297,6 +309,9 @@ pub struct Delivery {
     pub branch: String,
     pub protected: Vec<String>,
     pub force_push: bool,
+    /// Switch to the task branch when a loop starts (only from a protected or detached branch), so the
+    /// work happens on its own branch from the first edit. Off: the branch is made at delivery.
+    pub branch_at_start: bool,
 }
 
 impl Default for Delivery {
@@ -307,6 +322,7 @@ impl Default for Delivery {
             branch: "ai/{slug}".into(),
             protected: ["main", "master", "develop", "release/*"].map(String::from).to_vec(),
             force_push: false,
+            branch_at_start: false,
         }
     }
 }
@@ -406,6 +422,7 @@ approval = "ask"              # "ask" | "auto"
 branch = "ai/{slug}"
 protected = ["main", "master", "develop", "release/*"]
 force_push = false
+branch_at_start = false       # true: the app switches to the task branch when a run starts (from a protected branch)
 
 [copilot]                     # when a role is "copilot"
 model = "claude-sonnet-5"     # for roles that say just "copilot"
@@ -612,7 +629,7 @@ impl Policy {
     fn bash(&self, command: &str, repo: &Path) -> Verdict {
         let words: Vec<&str> =
             command.split(|c: char| c.is_whitespace() || ";|&()`".contains(c)).filter(|w| !w.is_empty()).collect();
-        if let Some(verb) = git_verbs(&words).into_iter().find(|v| self.git.deny.iter().any(|d| d == v)) {
+        if let Some(verb) = git_verbs(&words).into_iter().find(|v| self.git.denied().contains(v)) {
             return Verdict::Deny(format!("git {verb} is not allowed for agents; Kormilant handles delivery."));
         }
         if SHELL_OPERATORS.iter().any(|op| command.contains(op)) {
@@ -838,6 +855,16 @@ mod tests {
     }
 
     #[test]
+    fn push_stays_denied_when_removed_from_the_list() {
+        let p = Policy::from_toml("[git]\ndeny = [\"checkout\"]\n[shell]\nallow = [\"git\"]").unwrap();
+        assert!(matches!(bash(&p, "git push origin HEAD"), Verdict::Deny(_)));
+        assert!(matches!(bash(&p, "git -C . push --force"), Verdict::Deny(_)));
+        assert!(matches!(bash(&p, "git checkout -b x"), Verdict::Deny(_)));
+        assert!(!matches!(bash(&p, "git commit -m x"), Verdict::Deny(_)), "only the listed verbs and push");
+        assert_eq!(p.git.denied(), ["push", "checkout"]);
+    }
+
+    #[test]
     fn template_parses_to_defaults() {
         assert_eq!(Policy::from_toml(default_toml()).unwrap(), Policy::default());
         assert_eq!(Policy::from_toml("").unwrap(), Policy::default());
@@ -906,6 +933,10 @@ mod tests {
         let same = serde_json::to_value(Policy::default()).unwrap();
         assert_eq!(apply_values(default_toml(), &same).unwrap(), default_toml());
         assert!(apply_values(default_toml(), &json!({ "roles": { "implementer": "gpt" } })).is_err());
+        // A file written before a key existed gets it added.
+        let old = "[delivery]\nmode = \"none\"\n";
+        let out = apply_values(old, &json!({ "delivery": { "branch_at_start": true } })).unwrap();
+        assert!(Policy::from_toml(&out).unwrap().delivery.branch_at_start, "{out}");
     }
 
     #[test]

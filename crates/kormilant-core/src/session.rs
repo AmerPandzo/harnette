@@ -252,7 +252,7 @@ where
     }
     let label = match cfg.mode {
         Mode::Analyze { .. } => "Analysis",
-        Mode::Refine => "Refine",
+        Mode::Refine { .. } => "Refine",
         Mode::Implement { .. } => "Implementation",
         Mode::Review { .. } => "Review",
     };
@@ -432,7 +432,11 @@ fn offer_delivery(repo: &std::path::Path, slug: &str, sink: &Sink) {
         Err(e) => return sink(RunEvent::Error { message: format!("{e:#}") }),
     };
     if policy.delivery.mode == DeliveryMode::None {
-        return;
+        return sink(RunEvent::Info {
+            message: "Delivery is off ([delivery] mode = \"none\"): the changes stay uncommitted on the current branch. \
+                      Set After Done to commit, push or PR in Policy to get a task branch."
+                .into(),
+        });
     }
     match crate::delivery::plan(repo, slug, &policy) {
         Err(e) => sink(RunEvent::Info { message: format!("Not delivered: {e:#}") }),
@@ -506,6 +510,9 @@ async fn run_loop(
     let mut rounds_done = 0u32;
     let mut round = first;
     let mut last_build: Option<BuildOutcome> = None;
+    if let Some(message) = crate::delivery::start_branch(repo, slug, &policy.delivery)? {
+        sink(RunEvent::Info { message });
+    }
 
     loop {
         session.wait_if_paused().await;

@@ -118,13 +118,9 @@ pub fn parse(slug: &str, md: &str) -> TaskSummary {
         .unwrap_or_default();
     let criteria: Vec<bool> = section(md, "Acceptance criteria").filter_map(checkbox).collect();
     let findings: Vec<bool> = section(md, "Review log").filter_map(open_finding).collect();
-    let open_questions = section(md, "Open questions")
-        .filter(|l| {
-            let t = l.trim_start();
-            (t.starts_with("- ") || t.starts_with("* ") || t.chars().next().is_some_and(|c| c.is_ascii_digit()))
-                && !t.to_lowercase().contains("decided")
-                && checkbox(t) != Some(true)
-        })
+    let open_questions = questions(md)
+        .iter()
+        .filter(|q| q.decided.is_none() && !q.text.starts_with("[x]") && !q.text.starts_with("[X]"))
         .count() as u32;
     TaskSummary {
         slug: slug.to_string(),
@@ -212,6 +208,148 @@ pub fn set_status(repo: &Path, slug: &str, kind: StatusKind) -> anyhow::Result<(
     write(repo, slug, &with_status(&md, kind))
 }
 
+/// One item of the doc's Open questions list, for answering in the app.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Question {
+    /// Position in the list; `answer_questions` addresses questions by it.
+    pub index: usize,
+    /// The question as written, without its list marker, answers or options.
+    pub text: String,
+    /// `Some` when the analyst marked it Decided.
+    pub decided: Option<String>,
+    /// An answer the human already wrote (an `**Answer:**` line), not yet picked up by the analyst.
+    pub answer: Option<String>,
+    /// Suggested answers the analyst listed as `- Option: …` sub-items.
+    pub options: Vec<String>,
+}
+
+/// `- x`, `* x`, `1. x`, `1) x` at the start of a line → the text after the marker.
+fn list_item(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+        return Some(rest);
+    }
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    t[digits..].strip_prefix(". ").or_else(|| t[digits..].strip_prefix(") "))
+}
+
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Line ranges (within `md.lines()`) of the top-level items in the Open questions section.
+fn question_spans(md: &str) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = md.lines().collect();
+    let Some(head) = lines.iter().position(|l| {
+        l.strip_prefix("## ").is_some_and(|h| h.trim().to_lowercase().starts_with("open questions"))
+    }) else {
+        return vec![];
+    };
+    let end = lines[head + 1..].iter().position(|l| l.starts_with("## ")).map_or(lines.len(), |i| head + 1 + i);
+    let mut spans: Vec<(usize, usize)> = vec![];
+    for (i, l) in lines.iter().enumerate().take(end).skip(head + 1) {
+        if indent(l) < 2 && list_item(l).is_some() {
+            spans.push((i, i + 1));
+        } else if let Some(last) = spans.last_mut()
+            && !l.trim().is_empty()
+            && (indent(l) >= 2 || list_item(l).is_none())
+        {
+            last.1 = i + 1;
+        }
+    }
+    spans
+}
+
+fn clean(s: &str) -> String {
+    s.replace("**", "").replace("~~", "").trim().trim_start_matches(':').trim().to_string()
+}
+
+pub fn questions(md: &str) -> Vec<Question> {
+    let lines: Vec<&str> = md.lines().collect();
+    question_spans(md)
+        .into_iter()
+        .enumerate()
+        .map(|(index, (start, end))| {
+            let mut text = vec![list_item(lines[start]).unwrap_or_default().trim().to_string()];
+            let (mut decided, mut answer, mut options) = (None, None::<String>, vec![]);
+            for l in &lines[start + 1..end] {
+                let t = l.trim();
+                let plain = t.replace("**", "");
+                if let Some(o) = list_item(l).and_then(|r| r.strip_prefix("Option:").or_else(|| r.strip_prefix("**Option:**"))) {
+                    options.push(o.trim().to_string());
+                } else if let Some(a) = plain.strip_prefix("Answer:") {
+                    answer = Some(a.trim().to_string());
+                } else if plain.to_lowercase().starts_with("decided") {
+                    decided = Some(clean(&plain[plain.find(':').map_or(7, |i| i + 1)..]));
+                } else if let Some(a) = answer.as_mut() {
+                    a.push('\n');
+                    a.push_str(t);
+                } else {
+                    text.push(t.to_string());
+                }
+            }
+            // "1. ~~Part B now?~~ **Decided:** do it" keeps the decision on the question's own line.
+            let first = text[0].clone();
+            if decided.is_none()
+                && let Some(i) = first.to_lowercase().find("decided")
+            {
+                decided = Some(clean(&first[i + "decided".len()..]));
+                text[0] = clean(&first[..i]);
+            }
+            Question { index, text: text.join("\n").trim().to_string(), decided, answer, options }
+        })
+        .collect()
+}
+
+/// Write the human's answers under their questions as `**Answer:** …` lines (replacing an earlier
+/// unprocessed answer). Empty answers remove that line. The analyst turns them into `Decided:` on Refine.
+pub fn answer_questions(md: &str, answers: &[(usize, String)]) -> anyhow::Result<String> {
+    let spans = question_spans(md);
+    let mut lines: Vec<String> = md.lines().map(String::from).collect();
+    // Bottom-up, so earlier spans keep their line numbers.
+    let mut sorted: Vec<&(usize, String)> = answers.iter().collect();
+    sorted.sort_by_key(|(i, _)| std::cmp::Reverse(*i));
+    for (index, answer) in sorted {
+        let Some(&(start, end)) = spans.get(*index) else { bail!("no open question number {}", index + 1) };
+        let pad = " ".repeat(lines[start].len() - lines[start].trim_start().len() + 3);
+        // Drop an earlier answer (its line and continuation lines up to the next option/decision).
+        let mut keep: Vec<String> = vec![];
+        let mut in_answer = false;
+        for l in &lines[start + 1..end] {
+            let plain = l.trim().replace("**", "");
+            if plain.starts_with("Answer:") {
+                in_answer = true;
+            } else if in_answer && list_item(l).is_none() && !plain.to_lowercase().starts_with("decided") {
+                continue;
+            } else {
+                in_answer = false;
+                keep.push(l.clone());
+                continue;
+            }
+        }
+        let a = answer.trim();
+        if !a.is_empty() {
+            let mut it = a.lines();
+            keep.push(format!("{pad}**Answer:** {}", it.next().unwrap_or_default().trim()));
+            keep.extend(it.map(|l| format!("{pad}{}", l.trim())));
+        }
+        lines.splice(start + 1..end, keep);
+    }
+    let mut out = lines.join("\n");
+    if md.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+pub fn save_answers(repo: &Path, slug: &str, answers: &[(usize, String)]) -> anyhow::Result<()> {
+    let md = read(repo, slug)?;
+    write(repo, slug, &answer_questions(&md, answers)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +409,37 @@ mod tests {
         assert_eq!(parse("T-1", &read(&repo, "T-1").unwrap()).status_kind, StatusKind::InReview);
         assert!(read(&repo, "../etc/passwd").is_err());
         fs::remove_dir_all(&repo).unwrap();
+    }
+
+    const QS: &str = "# T\n\n## Open questions\n\n1. How many decimals?\n   - Option: 2\n   - Option: none, keep full precision\n2. ~~Part B now?~~ **Decided:** do it here.\n3. What should percent(1, 0) do?\n   More context on the second line.\n   **Answer:** throw\n   a RangeError\n\n## Implementation notes\n";
+
+    #[test]
+    fn parses_questions() {
+        let q = questions(QS);
+        assert_eq!(q.len(), 3);
+        assert_eq!(q[0].text, "How many decimals?");
+        assert_eq!(q[0].options, ["2", "none, keep full precision"]);
+        assert_eq!((q[0].decided.as_deref(), q[0].answer.as_deref()), (None, None));
+        assert_eq!(q[1].text, "Part B now?");
+        assert_eq!(q[1].decided.as_deref(), Some("do it here."));
+        assert_eq!(q[2].text, "What should percent(1, 0) do?\nMore context on the second line.");
+        assert_eq!(q[2].answer.as_deref(), Some("throw\na RangeError"));
+        assert!(questions("## Open questions\n\nNone.\n").is_empty());
+        assert!(questions("# no section\n").is_empty());
+    }
+
+    #[test]
+    fn writes_answers_under_questions() {
+        let md = answer_questions(QS, &[(0, "2 decimals\nround half up".into()), (2, "return Infinity".into())]).unwrap();
+        let q = questions(&md);
+        assert_eq!(q[0].answer.as_deref(), Some("2 decimals\nround half up"));
+        assert_eq!(q[0].options.len(), 2, "options are kept");
+        assert_eq!(q[2].answer.as_deref(), Some("return Infinity"), "the earlier answer is replaced");
+        assert_eq!(q[2].text, "What should percent(1, 0) do?\nMore context on the second line.");
+        assert!(md.contains("   **Answer:** 2 decimals\n   round half up\n2. ~~Part B"));
+        assert!(md.ends_with("## Implementation notes\n"));
+        let cleared = answer_questions(&md, &[(2, " ".into())]).unwrap();
+        assert_eq!(questions(&cleared)[2].answer, None);
+        assert!(answer_questions(QS, &[(7, "x".into())]).is_err());
     }
 }

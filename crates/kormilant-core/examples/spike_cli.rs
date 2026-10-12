@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         }
         other => {
             let mode = match other {
-                "--refine" => Mode::Refine,
+                "--refine" => Mode::Refine { message: None },
                 file => Mode::Analyze { ticket: std::fs::read_to_string(file)? },
             };
             let mut cfg = RunConfig::new(repo, slug, mode);

@@ -5,6 +5,7 @@
   import DOMPurify from "dompurify";
   import { marked } from "marked";
   import OpenInEditor from "./OpenInEditor.svelte";
+  import QuestionsPane from "./QuestionsPane.svelte";
   import ReviewPane from "./ReviewPane.svelte";
   import { editors } from "./editor.svelte";
   import { STATUS_LABELS, type Checkpoint, type StatusKind, type TaskSummary } from "./types";
@@ -24,7 +25,8 @@
     /** Bumped whenever task docs change on disk. */
     version: number;
     busy: boolean;
-    onrefine: () => void;
+    /** Run the analyst on the answered questions, with an optional message. */
+    onrefine: (message: string) => void;
     /** base: review against this branch/ref instead of the loop's first checkpoint. */
     onrun: (base: string) => void;
     ondeliver: () => void;
@@ -32,7 +34,15 @@
   } = $props();
 
   let checkpoints = $state<Checkpoint[]>([]);
-  let view = $state<"doc" | "review">("doc");
+  let view = $state<"doc" | "questions" | "review">("doc");
+  const analysis = $derived(task.status_kind === "analysis");
+  const showQuestions = $derived(analysis || task.open_questions > 0);
+
+  $effect(() => {
+    // Opening a task in Analysis lands on its questions; other tasks on the doc.
+    void task.slug;
+    view = task.status_kind === "analysis" ? "questions" : "doc";
+  });
   let base = $state("");
   const runnable = $derived(["ready", "changes_requested", "in_review"].includes(task.status_kind));
 
@@ -130,6 +140,11 @@
       <span class="slug">{task.slug}</span>
       <span class="seg">
         <button class:on={view === "doc"} onclick={() => (view = "doc")}>Doc</button>
+        {#if showQuestions}
+          <button class:on={view === "questions"} onclick={() => (view = "questions")} disabled={editing}
+            >Questions{#if task.open_questions}<span class="count">{task.open_questions}</span>{/if}</button
+          >
+        {/if}
         <button class:on={view === "review"} onclick={() => (view = "review")} disabled={editing}>Review</button>
       </span>
       <select value={task.status_kind} onchange={setStatus} disabled={editing} title="Status line in the doc">
@@ -144,11 +159,6 @@
         <button onclick={() => (editing = false)}>Cancel</button>
         <button class="primary" onclick={save}>Save</button>
       {:else}
-        <button
-          onclick={onrefine}
-          disabled={busy || task.status_kind !== "analysis"}
-          title="Continue the analysis after answering Open questions in the doc">Refine</button
-        >
         {#if task.status_kind === "in_review"}
           <input
             class="base"
@@ -188,6 +198,8 @@
   {/if}
   {#if editing}
     <textarea bind:value={draft} spellcheck="false"></textarea>
+  {:else if view === "questions" && showQuestions}
+    <QuestionsPane {repo} slug={task.slug} {version} {busy} {analysis} {onrefine} />
   {:else if view === "review"}
     <ReviewPane {repo} slug={task.slug} {version} />
   {:else}
@@ -237,6 +249,14 @@
     border-radius: 0;
     padding: 3px 10px;
     font-size: 12px;
+  }
+  .count {
+    margin-left: 5px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: white;
+    font-size: 10.5px;
   }
   .seg button.on {
     background: var(--accent-soft);
