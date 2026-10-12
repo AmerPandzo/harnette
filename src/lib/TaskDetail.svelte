@@ -27,7 +27,7 @@
     version: number;
     busy: boolean;
     /** Run the analyst on the answered questions, with an optional message. */
-    onrefine: (message: string) => void;
+    onrefine: (message: string, images: string[]) => void;
     /** base: review against this branch/ref instead of the loop's first checkpoint. */
     onrun: (base: string) => void;
     ondeliver: () => void;

@@ -105,10 +105,25 @@ async function guarded(f: () => Promise<unknown>) {
   }
 }
 
-export async function startRun(args: { repo: string; slug: string; mode: "analyze" | "refine"; ticket?: string; model?: string; message?: string }) {
+export async function startRun(args: {
+  repo: string;
+  slug: string;
+  mode: "analyze" | "refine";
+  ticket?: string;
+  model?: string;
+  message?: string;
+  /** Saved attachments (see attach.ts `upload`). */
+  images?: string[];
+}) {
   begin(args.slug, args.mode);
   await guarded(() =>
-    invoke("start_run", { ...args, ticket: args.ticket ?? null, model: args.model || null, message: args.message?.trim() || null }),
+    invoke("start_run", {
+      ...args,
+      ticket: args.ticket ?? null,
+      model: args.model || null,
+      message: args.message?.trim() || null,
+      images: args.images?.length ? args.images : null,
+    }),
   );
 }
 
@@ -121,4 +136,4 @@ export const answer = (a: Ask, allow: boolean) => invoke("answer_permission", { 
 export const stopRun = () => invoke("stop_run");
 export const pauseRun = () => invoke("pause_run");
 export const resumeRun = () => invoke("resume_run");
-export const sendNote = (text: string) => invoke("send_note", { text });
+export const sendNote = (text: string, images: string[] = []) => invoke("send_note", { text, images: images.length ? images : null });

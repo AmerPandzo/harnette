@@ -46,8 +46,8 @@ impl Session {
         self.current().is_some_and(|h| h.answer(request_id, allow))
     }
 
-    pub async fn note(&self, text: &str) -> anyhow::Result<()> {
-        self.current().context("No agent is running right now (Kormilant may be building).")?.note(text).await
+    pub async fn note(&self, text: &str, images: &[String]) -> anyhow::Result<()> {
+        self.current().context("No agent is running right now (Kormilant may be building).")?.note(text, images).await
     }
 
     pub fn stop(&self) {

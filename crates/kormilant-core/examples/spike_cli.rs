@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
                     "pause" => handle.pause("paused from the terminal"),
                     "resume" => handle.resume(),
                     _ if line.starts_with("note ") => {
-                        if let Err(err) = handle.note(&line[5..]).await { eprintln!("note failed: {err}"); }
+                        if let Err(err) = handle.note(&line[5..], &[]).await { eprintln!("note failed: {err}"); }
                     }
                     "" => {}
                     _ => eprintln!("commands: y | n | note <text> | pause | resume | stop"),

@@ -5,11 +5,16 @@
   import Icon from "./Icon.svelte";
   import { buildTimeline, fmtDuration, shortPath, toolIcon, toolVerb, type Section, type ToolItem } from "./feed";
   import { pauseRun, resumeRun, run, sendNote, stopRun } from "./run.svelte";
+  import Attachments from "./Attachments.svelte";
+  import { savedPreview, upload, type Pending } from "./attach";
   import { fmtTokens } from "./types";
 
   let { repo, onnew }: { repo: string; onnew: () => void } = $props();
 
   let note = $state("");
+  let noteImages = $state<Pending[]>([]);
+  let composer = $state<HTMLElement>();
+  let attach = $state<Attachments>();
   let feedEl: HTMLElement | undefined = $state();
   let open = $state<Record<string, boolean>>({});
   let now = $state(Date.now());
@@ -80,10 +85,12 @@
 
   async function submitNote(ev?: Event) {
     ev?.preventDefault();
-    if (!note.trim() || !run.running) return;
+    if ((!note.trim() && !noteImages.length) || !run.running) return;
     try {
-      await sendNote(note.trim());
+      const paths = await upload(repo, run.slug, noteImages);
+      await sendNote(note.trim() || "See the attached image.", paths);
       note = "";
+      noteImages = [];
     } catch (e) {
       run.error = String(e);
     }
@@ -230,7 +237,20 @@
                     {/if}
                   </div>
                 {:else if it.t === "note"}
-                  <div class="you"><span class="youlabel">You</span>{it.text}</div>
+                  <div class="you">
+                    <span class="youlabel">You</span>{it.text}
+                    {#if it.images.length}
+                      <div class="youimgs">
+                        {#each it.images as path (path)}
+                          {#await savedPreview(repo, path) then src}
+                            <img {src} alt={path} title={path} />
+                          {:catch}
+                            <span class="faint">{path}</span>
+                          {/await}
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
                 {:else if it.t === "alarm"}
                   <div class="callout" class:bad={it.e.action !== "warn"}>
                     <Icon name="alert" size={14} />
@@ -303,15 +323,24 @@
       {/each}
     </div>
 
-    <form class="composer" onsubmit={submitNote}>
+    <form class="composer" onsubmit={submitNote} bind:this={composer}>
+      <div class="cbody">
+      <Attachments bind:this={attach} bind:items={noteImages} zone={composer} disabled={!run.running} compact />
       <textarea
         rows="1"
         bind:value={note}
         onkeydown={onKey}
+        onpaste={(e) => attach?.paste(e)}
         placeholder={run.running ? "Message the agent — it reads it after its current step (Enter to send, Shift+Enter for a new line)" : "No agent is running"}
         disabled={!run.running}
       ></textarea>
-      <button type="submit" class="primary send" disabled={!run.running || !note.trim()} title="Send"><Icon name="send" size={14} /></button>
+      </div>
+      <button type="button" class="ghost send" onclick={() => attach?.pick()} disabled={!run.running} title="Attach images (or paste / drop them)"
+        ><Icon name="paperclip" size={15} /></button
+      >
+      <button type="submit" class="primary send" disabled={!run.running || (!note.trim() && !noteImages.length)} title="Send"
+        ><Icon name="send" size={14} /></button
+      >
     </form>
   {/if}
 </div>
@@ -775,6 +804,26 @@
   }
   .composer:focus-within {
     border-color: var(--accent);
+  }
+  .cbody {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .youimgs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .youimgs img {
+    max-width: 220px;
+    max-height: 160px;
+    border-radius: 6px;
+    display: block;
+    border: 1px solid rgba(255, 255, 255, 0.35);
   }
   .composer textarea {
     flex: 1;

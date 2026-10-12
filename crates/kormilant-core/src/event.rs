@@ -27,7 +27,12 @@ pub enum RunEvent {
     /// Waiting for the human.
     PermissionAsk { request_id: String, tool: String, summary: String },
     PermissionAnswered { request_id: String, allowed: bool, by: String },
-    Note { text: String },
+    Note {
+        text: String,
+        /// Attached images, repo-relative.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
+    },
     /// Token usage of one assistant message; repeated per content block, so consumers dedupe by id.
     Usage { message_id: String, new_tokens: u64 },
     Quota { status: String, five_hour: f64, seven_day: f64 },

@@ -24,7 +24,7 @@ export type Item =
   | { t: "text"; text: string }
   | ToolItem
   | { t: "explore"; tools: ToolItem[] }
-  | { t: "note"; text: string }
+  | { t: "note"; text: string; images: string[] }
   | { t: "build"; e: Ev<"build"> }
   | { t: "status"; e: Ev<"status_changed"> }
   | { t: "checkpoint"; e: Ev<"checkpoint"> }
@@ -165,7 +165,7 @@ export function buildTimeline(events: RunEvent[], initialRole: string): Section[
         break;
       }
       case "note":
-        current().items.push({ t: "note", text: e.text });
+        current().items.push({ t: "note", text: e.text, images: e.images ?? [] });
         break;
       case "finished":
         current().finished = e;

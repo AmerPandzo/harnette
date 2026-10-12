@@ -1,13 +1,14 @@
 //! Tauri shell: exposes kormilant-core runs and task docs to the web UI
 //! as commands plus `run-event` / `tasks-changed` events.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use kormilant_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
 use kormilant_core::review::{Criterion, Finding, parse_criteria, parse_findings};
 use kormilant_core::tasks::{self, Question, StatusKind, TaskSummary};
 use kormilant_core::watch::{TaskWatcher, watch_tasks};
+use kormilant_core::attach;
 use kormilant_core::delivery::{self, Outcome, Plan};
 use kormilant_core::editor::{self, Editor};
 use kormilant_core::git::{self, Checkpoint};
@@ -118,6 +119,7 @@ async fn start_run(
     ticket: Option<String>,
     model: Option<String>,
     message: Option<String>,
+    images: Option<Vec<String>>,
 ) -> Result<(), String> {
     if busy(&state) {
         return Err("A run is already in progress.".into());
@@ -133,6 +135,7 @@ async fn start_run(
     let mut cfg = RunConfig::new(repo, &slug, mode);
     cfg.model = model.filter(|m| !m.trim().is_empty());
     cfg.prior = prior;
+    cfg.images = assets(images)?;
     let ctx = Ctx { app: app.clone(), repo: repo_key, slug, role: Mutex::new("analyst".into()) };
     let session = start_single(cfg, session_sink(ctx)).await.map_err(err)?;
     state.run.lock().unwrap().replace(session);
@@ -275,9 +278,35 @@ fn answer_permission(state: State<'_, AppState>, request_id: String, allow: bool
 }
 
 #[tauri::command]
-async fn send_note(state: State<'_, AppState>, text: String) -> Result<(), String> {
+async fn send_note(state: State<'_, AppState>, text: String, images: Option<Vec<String>>) -> Result<(), String> {
+    let images = assets(images)?;
     let handle = state.run.lock().unwrap().clone().ok_or("No run in progress.")?;
-    handle.note(&text).await.map_err(err)
+    handle.note(&text, &images).await.map_err(err)
+}
+
+fn assets(images: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let images = images.unwrap_or_default();
+    match images.iter().find(|p| !attach::is_asset(p)) {
+        Some(p) => Err(format!("not an attached image: {p}")),
+        None => Ok(images),
+    }
+}
+
+/// Save a pasted or picked image under `.ai-tasks/<slug>.assets/`; returns its repo-relative path.
+#[tauri::command]
+fn attach_image(repo: String, slug: String, mime: String, data: String) -> Result<String, String> {
+    attach::save_base64(&expand_home(repo.trim()), slug.trim(), &mime, &data).map_err(err)
+}
+
+/// A file dropped on the window, as `(mime, base64)`.
+#[tauri::command]
+fn read_image_file(path: String) -> Result<(String, String), String> {
+    attach::read_file(Path::new(&path)).map_err(err)
+}
+
+#[tauri::command]
+fn image_data(repo: String, path: String) -> Result<String, String> {
+    attach::data_url(&expand_home(repo.trim()), &path).map_err(err)
 }
 
 #[tauri::command]
@@ -459,6 +488,9 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             start_run,
+            attach_image,
+            read_image_file,
+            image_data,
             start_loop,
             list_checkpoints,
             restore_checkpoint,

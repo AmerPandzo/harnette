@@ -6,6 +6,7 @@ description = "Kormilant core: agent adapters, policy, journal. No UI code."
 
 [dependencies]
 anyhow = "1"
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "8"

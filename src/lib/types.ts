@@ -51,7 +51,7 @@ export type RunEvent =
   | { kind: "permission_auto"; request_id: string; tool: string; summary: string; allowed: boolean; rule: string }
   | { kind: "permission_ask"; request_id: string; tool: string; summary: string }
   | { kind: "permission_answered"; request_id: string; allowed: boolean; by: string }
-  | { kind: "note"; text: string }
+  | { kind: "note"; text: string; images?: string[] }
   | { kind: "usage"; message_id: string; new_tokens: number }
   | { kind: "quota"; status: string; five_hour: number; seven_day: number }
   | Finished

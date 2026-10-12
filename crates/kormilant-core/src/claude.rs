@@ -14,6 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
+use crate::attach;
 use crate::event::{Parsed, RunEvent, parse_line, summarize_tool};
 use crate::journal::{Journal, new_run_id};
 use crate::policy::{Policy, Role, Verdict, Worker};
@@ -71,6 +72,8 @@ pub struct RunConfig {
     pub max_budget_usd: Option<f64>,
     /// Usage of this task before this run (from the ledger), for the watchdog's budgets.
     pub prior: PriorUsage,
+    /// Images attached to the first message (repo-relative, see `attach`).
+    pub images: Vec<String>,
 }
 
 impl RunConfig {
@@ -87,6 +90,7 @@ impl RunConfig {
             guard_bin: None,
             max_budget_usd: None,
             prior: PriorUsage::default(),
+            images: Vec::new(),
         }
     }
 }
@@ -95,6 +99,7 @@ type Emit = Arc<dyn Fn(RunEvent) + Send + Sync>;
 
 struct Inner {
     run_id: String,
+    repo: PathBuf,
     pid: Option<u32>,
     stdin: AsyncMutex<Option<ChildStdin>>,
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
@@ -124,10 +129,11 @@ impl Handle {
     }
 
     /// Send a steering note; the agent sees it after its current tool call.
-    pub async fn note(&self, text: &str) -> anyhow::Result<()> {
-        let msg = json!({ "type": "user", "message": { "role": "user", "content": format!("Note from the human supervisor: {text}") } });
+    pub async fn note(&self, text: &str, images: &[String]) -> anyhow::Result<()> {
+        let content = attach::content(&self.inner.repo, &format!("Note from the human supervisor: {text}"), images);
+        let msg = json!({ "type": "user", "message": { "role": "user", "content": content } });
         write_line(&self.inner, &msg).await.context("the run has already finished")?;
-        (self.inner.emit)(RunEvent::Note { text: text.to_string() });
+        (self.inner.emit)(RunEvent::Note { text: text.to_string(), images: images.to_vec() });
         Ok(())
     }
 
@@ -261,6 +267,17 @@ fn sh_quote(s: &str) -> String {
 
 /// The first prompt for the run's mode.
 pub(crate) fn prompt_text(cfg: &RunConfig) -> String {
+    let mut text = mode_prompt(cfg);
+    let assets = attach::assets_dir(&cfg.slug);
+    if !matches!(cfg.mode, Mode::Analyze { .. }) && cfg.repo.join(&assets).is_dir() {
+        text.push_str(&format!(
+            "\n\nImages the human attached to this task are in `{assets}/`. Open the ones the task doc links (or that look relevant) with Read."
+        ));
+    }
+    text
+}
+
+fn mode_prompt(cfg: &RunConfig) -> String {
     match &cfg.mode {
         Mode::Analyze { ticket } => prompt::analyze(&cfg.slug, ticket),
         Mode::Refine { message } => {
@@ -322,6 +339,7 @@ where
     let (kill_tx, kill_rx) = oneshot::channel();
     let inner = Arc::new(Inner {
         run_id: run_id.clone(),
+        repo: repo.clone(),
         pid: child.id(),
         stdin: AsyncMutex::new(child.stdin.take()),
         pending: Mutex::new(HashMap::new()),
@@ -336,7 +354,7 @@ where
     let text = prompt_text(&cfg);
     // The prompt goes to stdin, which the CLI does not echo; keep it for the audit trail.
     journal.lock().unwrap().raw(&json!({ "kormilant_prompt": text }).to_string());
-    let first = json!({ "type": "user", "message": { "role": "user", "content": text } });
+    let first = json!({ "type": "user", "message": { "role": "user", "content": attach::content(&repo, &text, &cfg.images) } });
     write_line(&inner, &first).await?;
 
     let stderr_tail = Arc::new(Mutex::new(VecDeque::<String>::new()));

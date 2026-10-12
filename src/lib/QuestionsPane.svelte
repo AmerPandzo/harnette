@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import DOMPurify from "dompurify";
   import { marked } from "marked";
+  import Attachments from "./Attachments.svelte";
+  import { upload, type Pending } from "./attach";
 
   type Question = { index: number; text: string; decided: string | null; answer: string | null; options: string[] };
 
@@ -19,13 +21,16 @@
     busy: boolean;
     /** Refine only runs while the task is in Analysis. */
     analysis: boolean;
-    onrefine: (message: string) => void;
+    onrefine: (message: string, images: string[]) => void;
   } = $props();
 
   let questions = $state<Question[]>([]);
   /** Typed answers by question text, so a doc reload does not lose them. */
   let drafts = $state<Record<string, string>>({});
   let message = $state("");
+  let images = $state<Pending[]>([]);
+  let msgBox = $state<HTMLElement>();
+  let attach = $state<Attachments>();
   let error = $state("");
   let saved = $state("");
 
@@ -46,6 +51,7 @@
     void slug;
     drafts = {};
     message = "";
+    images = [];
     saved = "";
   });
 
@@ -77,9 +83,14 @@
   }
 
   async function send() {
-    if (await save()) {
-      onrefine(message);
+    if (!(await save())) return;
+    try {
+      const paths = await upload(repo, slug, images);
+      onrefine(message, paths);
       message = "";
+      images = [];
+    } catch (e) {
+      error = String(e);
     }
   }
 </script>
@@ -121,10 +132,19 @@
     </details>
   {/if}
 
-  <label class="msg">
-    Message to the analyst <span class="quiet">(optional: extra requirements, corrections, or a question)</span>
-    <textarea rows="3" bind:value={message} placeholder="e.g. Also check the export path; keep the API unchanged." disabled={busy}></textarea>
-  </label>
+  <div class="msgwrap" bind:this={msgBox}>
+    <label class="msg">
+      Message to the analyst <span class="quiet">(optional: extra requirements, corrections, or a question)</span>
+      <textarea
+        rows="3"
+        bind:value={message}
+        placeholder="e.g. Also check the export path; keep the API unchanged. Paste screenshots with ⌘V."
+        disabled={busy}
+        onpaste={(e) => attach?.paste(e)}
+      ></textarea>
+    </label>
+    <Attachments bind:this={attach} bind:items={images} zone={msgBox} disabled={busy} />
+  </div>
 
   <div class="actions">
     {#if saved}<span class="quiet">{saved}</span>{/if}
@@ -132,7 +152,7 @@
     <button
       class="primary"
       onclick={send}
-      disabled={busy || (answered.length === 0 && !message.trim())}
+      disabled={busy || (answered.length === 0 && !message.trim() && images.length === 0)}
       title="Save the answers, then the analyst turns them into decisions and updates the plan"
     >
       Send to analyst
@@ -234,6 +254,12 @@
   }
   .dv {
     color: var(--good);
+  }
+  .msgwrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-radius: 8px;
   }
   .msg {
     display: flex;

@@ -2,6 +2,7 @@
 //! No UI code lives here; the Tauri app and the spike CLI are thin shells over it.
 
 pub mod agent;
+pub mod attach;
 pub mod build;
 pub mod claude;
 pub mod copilot;

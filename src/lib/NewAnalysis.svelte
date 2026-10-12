@@ -1,5 +1,7 @@
 <script lang="ts">
+  import Attachments from "./Attachments.svelte";
   import Icon from "./Icon.svelte";
+  import { upload, type Pending } from "./attach";
   import { run, startRun } from "./run.svelte";
   import { remember, remembered } from "./types";
 
@@ -9,12 +11,16 @@
   let model = $state(remembered("kormilant.model", ""));
   let ticket = $state("");
   let error = $state("");
+  let images = $state<Pending[]>([]);
+  let sheet = $state<HTMLElement>();
+  let attach = $state<Attachments>();
 
   async function start(ev: Event) {
     ev.preventDefault();
     remember("kormilant.model", model);
     try {
-      await startRun({ repo, slug: slug.trim(), mode: "analyze", ticket, model });
+      const paths = await upload(repo, slug.trim(), images);
+      await startRun({ repo, slug: slug.trim(), mode: "analyze", ticket, model, images: paths });
       onstarted();
     } catch (e) {
       error = String(e);
@@ -24,7 +30,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="scrim" onclick={(e) => e.target === e.currentTarget && onclose()}>
-  <form class="sheet" onsubmit={start}>
+  <form class="sheet" onsubmit={start} bind:this={sheet}>
     <div class="head">
       <span class="badge"><Icon name="sparkles" size={15} /></span>
       <div>
@@ -45,7 +51,16 @@
         </select>
       </label>
     </div>
-    <label>Ticket<textarea bind:value={ticket} rows="10" placeholder="Paste the ticket text, logs, links…" required></textarea></label>
+    <label
+      >Ticket<textarea
+        bind:value={ticket}
+        rows="10"
+        placeholder="Paste the ticket text, logs, links… and screenshots (⌘V)"
+        required
+        onpaste={(e) => attach?.paste(e)}
+      ></textarea></label
+    >
+    <Attachments bind:this={attach} bind:items={images} zone={sheet} />
     {#if error}<p class="error">{error}</p>{/if}
     <div class="foot">
       <span class="hint">Unlisted commands ask you first.</span>

@@ -31,8 +31,8 @@ impl RunHandle {
     }
 
     /// Steering note: Claude sees it after its current tool call, Copilot after its current turn.
-    pub async fn note(&self, text: &str) -> anyhow::Result<()> {
-        each!(self, h => h.note(text).await)
+    pub async fn note(&self, text: &str, images: &[String]) -> anyhow::Result<()> {
+        each!(self, h => h.note(text, images).await)
     }
 
     pub fn is_finished(&self) -> bool {

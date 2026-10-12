@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
+use crate::attach;
 use crate::claude::{RunConfig, exclude_ai_tasks, prompt_text, signal, validate};
 use crate::event::{RunEvent, summarize_tool, truncate};
 use crate::journal::{Journal, new_run_id};
@@ -61,12 +62,13 @@ impl Handle {
     }
 
     /// Queue a steering note; Copilot gets it as the next prompt when its current turn ends.
-    pub async fn note(&self, text: &str) -> anyhow::Result<()> {
+    /// Copilot gets image paths only; it opens them itself.
+    pub async fn note(&self, text: &str, images: &[String]) -> anyhow::Result<()> {
         if self.is_finished() {
             bail!("the run has already finished");
         }
-        self.inner.notes.lock().unwrap().push(text.to_string());
-        (self.inner.emit)(RunEvent::Note { text: text.to_string() });
+        self.inner.notes.lock().unwrap().push(format!("{text}{}", attach::listing(images)));
+        (self.inner.emit)(RunEvent::Note { text: text.to_string(), images: images.to_vec() });
         Ok(())
     }
 
@@ -459,6 +461,7 @@ where
     };
 
     let mut prompt = prompt_text(&cfg);
+    prompt.push_str(&attach::listing(&cfg.images));
     if let Some((path, rules)) = standing_instructions(&policy.copilot.instructions) {
         prompt.push_str(&format!("\n\n## Standing instructions (from {path})\n\n{rules}\n"));
     }
@@ -632,7 +635,7 @@ mod tests {
         let mut events = Vec::new();
         while let Some(e) = rx.recv().await {
             if let RunEvent::PermissionAsk { request_id, .. } = &e {
-                handle.note("hurry").await.unwrap();
+                handle.note("hurry", &[]).await.unwrap();
                 assert!(handle.answer(request_id, true));
             }
             let exited = matches!(e, RunEvent::Exited { .. });
