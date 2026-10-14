@@ -1,0 +1,35 @@
+# Push a tag like v0.1.0 (matching "version" in src-tauri/tauri.conf.json) to build the macOS app
+# and attach Harnette_<version>_aarch64.dmg to a GitHub Release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Harnette ${{ github.ref_name }}
+          releaseBody: |
+            Apple Silicon build for macOS 13+. Needs the Claude Code CLI installed and logged in.
+            The app isn't notarized: on first launch right-click it and choose Open, or run
+            `xattr -dr com.apple.quarantine /Applications/Harnette.app`.
+          releaseDraft: false
+          args: --bundles app,dmg
