@@ -11,6 +11,7 @@ use harnette_core::tasks::{self, Question, StatusKind, TaskSummary, expand_home}
 use harnette_core::watch::{TaskWatcher, watch_tasks};
 use harnette_core::attach;
 use harnette_core::workspace;
+use harnette_core::terminal;
 use harnette_core::delivery::{self, Outcome, Plan};
 use harnette_core::editor::{self, Editor};
 use harnette_core::git::{self, Checkpoint};
@@ -533,8 +534,19 @@ fn list_plugins() -> Vec<String> {
 }
 
 #[tauri::command]
+fn list_terminals() -> Vec<Editor> {
+    terminal::installed()
+}
+
+#[tauri::command]
 fn list_editors() -> Vec<Editor> {
     editor::installed()
+}
+
+/// A shell in the repo (or `claude --resume <session>` there) in one of the known terminals.
+#[tauri::command]
+fn open_terminal(repo: String, terminal: String, resume: Option<String>) -> Result<(), String> {
+    terminal::open(&expand_home(&repo), &terminal, resume.as_deref()).map_err(err)
 }
 
 /// Opens a repo file (never one outside the repo) in one of the known editors.
@@ -683,6 +695,8 @@ pub fn run() {
             list_tasks,
             read_task,
             list_editors,
+            list_terminals,
+            open_terminal,
             list_plugins,
             task_questions,
             save_answers,

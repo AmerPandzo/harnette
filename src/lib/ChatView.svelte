@@ -6,7 +6,9 @@
   import Icon from "./Icon.svelte";
   import { segments, type ChatAction } from "./actions";
   import { upload, savedPreview, type Pending } from "./attach";
-  import { chat, endChat, interruptChat, sendChat } from "./chat.svelte";
+  import { chat, detachChat, endChat, interruptChat, sendChat } from "./chat.svelte";
+  import SplitPick from "./SplitPick.svelte";
+  import { chooseTerminal, loadTerminals, openTerminal, terminalName, terminals } from "./terminal.svelte";
   import { buildTimeline, shortPath, toolIcon, toolVerb } from "./feed";
   import { answer, run, startLoop, startRun } from "./run.svelte";
   import { remembered, STATUS_LABELS, type TaskSummary } from "./types";
@@ -57,6 +59,13 @@
       e.preventDefault();
       send();
     }
+  }
+
+  loadTerminals();
+  async function continueInTerminal() {
+    const session = chat.sessionId;
+    if (session) await detachChat();
+    await openTerminal(repo, session);
   }
 
   async function about(next: string) {
@@ -116,6 +125,20 @@
     <span class="meta">
       {#if chat.model}{chat.model} · {/if}{#if chat.usd}${chat.usd.toFixed(3)}{/if}
     </span>
+    {#if terminals.list.length}
+      <SplitPick
+        options={terminals.list}
+        chosen={terminals.chosen}
+        onpick={chooseTerminal}
+        onclick={continueInTerminal}
+        title={chat.sessionId
+          ? `Continue this conversation in ${terminalName()} (claude --resume); your next message here picks it up again`
+          : `Open ${terminalName()} in the repository`}
+        aria="Terminal"
+      >
+        {#snippet label()}<Icon name="terminal" size={13} /> {chat.sessionId ? "Continue in" : "Open"} {terminalName()}{/snippet}
+      </SplitPick>
+    {/if}
     <button class="ghost" onclick={endChat} disabled={!chat.open && !chat.events.length} title="End this conversation and start fresh"
       ><Icon name="plus" size={13} /> New chat</button
     >
@@ -206,7 +229,7 @@
         </div>
       </div>
     {/each}
-    {#if chat.error || error}<div class="callout bad"><Icon name="alert" size={14} /> {chat.error || error}</div>{/if}
+    {#if chat.error || error || terminals.error}<div class="callout bad"><Icon name="alert" size={14} /> {chat.error || error || terminals.error}</div>{/if}
   </div>
 
   <form class="composer" onsubmit={send} bind:this={composer}>

@@ -144,6 +144,18 @@ export async function sendChat(args: { repo: string; task: string; text: string;
 
 export const interruptChat = () => invoke("chat_interrupt").catch((e) => (chat.error = String(e)));
 
+/** Hand the conversation to a terminal: end the app's process (two processes must not write one session),
+ *  keep the transcript; the next message here resumes the session, terminal turns included. */
+export async function detachChat() {
+  if (chat.open) await invoke("chat_end");
+  // Late events of the ended process are dropped (see the listener); a new chat number comes with the next message.
+  chat.id = 0;
+  chat.open = false;
+  chat.busy = false;
+  chat.asks = [];
+  save();
+}
+
 /** New chat: end the process and forget the conversation. */
 export async function endChat() {
   await invoke("chat_end");

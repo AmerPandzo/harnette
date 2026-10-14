@@ -8,6 +8,7 @@
   import OpenInEditor from "./OpenInEditor.svelte";
   import QuestionsPane from "./QuestionsPane.svelte";
   import RepoList from "./RepoList.svelte";
+  import { loadTerminals, openTerminal, terminalName, terminals } from "./terminal.svelte";
   import ReviewPane from "./ReviewPane.svelte";
   import { editors } from "./editor.svelte";
   import { STATUS_LABELS, type Checkpoint, type StatusKind, type TaskSummary } from "./types";
@@ -35,6 +36,7 @@
     onclose: () => void;
   } = $props();
 
+  loadTerminals();
   let checkpoints = $state<Checkpoint[]>([]);
   let view = $state<"doc" | "questions" | "review">("doc");
   const analysis = $derived(task.status_kind === "analysis");
@@ -176,6 +178,11 @@
           <button class="primary" onclick={save}>Save</button>
         {:else}
           <OpenInEditor {repo} path={`.ai-tasks/${task.slug}.md`} />
+          {#if terminals.list.length}
+            <button onclick={() => openTerminal(repo)} title={`Open ${terminalName()} in the repository (pick the terminal in Chat)`}
+              ><Icon name="terminal" size={13} /></button
+            >
+          {/if}
           <button onclick={edit} title="Edit the doc here"><Icon name="edit" size={13} /></button>
           {#if task.status_kind === "done"}
             <button onclick={ondeliver} disabled={busy} title="Commit, push or open a PR, per [delivery] in the policy"
@@ -202,6 +209,7 @@
   </div>
   {#if error}<p class="error pad">{error}</p>{/if}
   {#if editors.error}<p class="error pad">{editors.error}</p>{/if}
+  {#if terminals.error}<p class="error pad">{terminals.error}</p>{/if}
   {#if changedOnDisk}<p class="warn">The doc changed on disk while you were editing. Saving overwrites that change.</p>{/if}
   {#if !editing}
     <div class="cps" title="Agents read these repositories too; the implementer may change the git repos among them (checkpointed, built, reviewed and delivered with the task)">

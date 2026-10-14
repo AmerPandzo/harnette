@@ -17,6 +17,7 @@ pub mod prompt;
 pub mod review;
 pub mod session;
 pub mod tasks;
+pub mod terminal;
 pub mod watch;
 pub mod watchdog;
 pub mod workspace;

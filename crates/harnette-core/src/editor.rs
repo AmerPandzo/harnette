@@ -40,7 +40,7 @@ pub struct Editor {
     pub name: String,
 }
 
-fn app_path(bundle_ids: &[&str]) -> Option<PathBuf> {
+pub(crate) fn app_path(bundle_ids: &[&str]) -> Option<PathBuf> {
     bundle_ids.iter().find_map(|id| {
         let out = Command::new("/usr/bin/mdfind").arg(format!("kMDItemCFBundleIdentifier == '{id}'")).output().ok()?;
         String::from_utf8_lossy(&out.stdout).lines().map(PathBuf::from).find(|p| p.is_dir())

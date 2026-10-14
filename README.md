@@ -22,7 +22,9 @@ for coding agents.
 - **Review and delivery.** See the diff and the findings, restore any checkpoint, then let Harnette commit, push or open a PR,
   only after a green build and your approval.
 - **Chat.** A free-form Claude session about the repo or a task, beside any run. It can propose board actions
-  (start an analysis, run a task, move a card) as buttons you click.
+  (start an analysis, run a task, move a card) as buttons you click. **Continue in Stećak** carries the same conversation
+  over to a terminal (`claude --resume`), and your next message in the app picks it up again.
+- **Open in terminal.** A shell in the repo, in [Stećak](https://github.com/alminisl/stecak) or Terminal.
 - **Several repos per task.** A task can list related repositories: agents read them, and the implementer can change the git
   repos among them, with checkpoints, builds, review and delivery for each.
 - **Pick the skills agents get.** Switch your installed Claude Code plugins on or off per repo.
@@ -106,6 +108,13 @@ node scripts/check-actions.ts
 ```
 
 `scripts/playground.sh` creates a throwaway repo with tasks ready for manual testing.
+
+## Works well with Stećak
+
+[Stećak](https://github.com/alminisl/stecak) is a fast GPU terminal by [@alminisl](https://github.com/alminisl), built with
+Claude Code in mind: tabs show when an agent is working or waiting, a session browser resumes Claude Code
+conversations, and sessions come back after a restart. When it's installed, Harnette opens terminals in it by default,
+including **Continue in Stećak** from the chat. Without it, Harnette uses macOS Terminal.
 
 ## License
 
