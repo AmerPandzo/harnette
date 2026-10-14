@@ -204,7 +204,7 @@
   {#if editors.error}<p class="error pad">{editors.error}</p>{/if}
   {#if changedOnDisk}<p class="warn">The doc changed on disk while you were editing. Saving overwrites that change.</p>{/if}
   {#if !editing}
-    <div class="cps" title="Agents may read these repositories too (the doc's **Repos:** line)">
+    <div class="cps" title="Agents read these repositories too; the implementer may change the git repos among them (checkpointed, built, reviewed and delivered with the task)">
       <span class="meta">Related repos</span>
       {#key task.slug + task.repos.join()}<RepoList items={[...task.repos]} {repo} onchange={setRepos} />{/key}
     </div>

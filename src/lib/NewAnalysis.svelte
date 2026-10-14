@@ -64,7 +64,7 @@
     >
     <Attachments bind:this={attach} bind:items={images} zone={sheet} />
     <div class="related">
-      <span>Related repos <span class="hint">optional: other repos the agents may read for this task</span></span>
+      <span>Related repos <span class="hint">optional: agents read them; the implementer may change those that are git repos</span></span>
       <RepoList bind:items={repos} {repo} />
     </div>
     {#if error}<p class="error">{error}</p>{/if}

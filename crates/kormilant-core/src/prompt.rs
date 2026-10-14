@@ -1,6 +1,8 @@
 //! Prompts for each role. The task doc format is the contract between roles.
 
 use crate::claude::BuildSummary;
+use crate::policy::Role;
+use crate::workspace::Member;
 
 pub fn analyze(slug: &str, ticket: &str) -> String {
     format!(
@@ -100,7 +102,7 @@ pub fn chat(task: Option<&str>, related_repos: &[String]) -> String {
         ),
         None => "The chat is about the repository in general.".to_string(),
     };
-    let related = if related_repos.is_empty() { String::new() } else { related(related_repos, false) };
+    let related = if related_repos.is_empty() { String::new() } else { related(related_repos, false, &[], Role::Chat) };
     format!(
         r#"You are chatting with the human inside Kormilant, a control plane for coding agents, in the repository in
 the current directory. {about}
@@ -134,18 +136,32 @@ Rules:
 }
 
 /// The task spans other repositories too. `new_doc`: the analyst writes the doc and must record them.
-pub fn related(repos: &[String], new_doc: bool) -> String {
-    let list = repos.iter().map(|r| format!("- `{r}`")).collect::<Vec<_>>().join("\n");
+/// `members`: the related repos that are git repositories.
+pub fn related(repos: &[String], new_doc: bool, members: &[Member], role: Role) -> String {
+    let mut list = repos.iter().map(|r| format!("- `{r}`")).collect::<Vec<_>>().join("\n");
+    if !members.is_empty() {
+        list.push_str("\nMember repositories (git): ");
+        list.push_str(&members.iter().map(|m| format!("`{}` = `{}`", m.name, m.path.display())).collect::<Vec<_>>().join(", "));
+    }
     let record = if new_doc {
         format!("\nPut this line right under the Status line of the task doc: `**Repos:** {}`", repos.join(", "))
     } else {
         String::new()
     };
-    format!(
-        "\n\nThis task also concerns these related repositories. You may read and search them freely (Read, Grep, Glob, \
-         `git -C <dir> log`), but you may not change them in this run; describe changes they need in the task doc, \
-         naming the repository.\n{list}{record}"
-    )
+    let rules = match role {
+        Role::Implementer if !members.is_empty() => {
+            "You may change the member repositories too (Kormilant checkpoints, builds, reviews and delivers them with this task); \
+             the others are read-only. In the task doc, name a member's files `<member>/<path>`."
+        }
+        Role::Reviewer if !members.is_empty() => {
+            "Changes in member repositories are part of the diff, with paths prefixed `<member>/`. Review them like the rest; \
+             refer to their files as `<member>/<path>`."
+        }
+        _ => "You may read and search them freely (Read, Grep, Glob, `git -C <dir> log`), but you may not change them in this run; \
+              describe changes they need in the task doc, naming the repository (git repositories among them become members \
+              the implementer may change).",
+    };
+    format!("\n\nThis task also concerns these related repositories. {rules}\n{list}{record}")
 }
 
 const COMMON_RULES: &str = "Rules:

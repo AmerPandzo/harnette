@@ -2,6 +2,10 @@
   import { invoke } from "@tauri-apps/api/core";
   import type { DeliveryPlan } from "./types";
 
+  type Outcome = { repo: string; branch: string; commit: string | null; pushed: boolean; pr_url: string | null; related: Outcome[] };
+  const describe = (o: Outcome) =>
+    `${o.repo ? `${o.repo}: ` : ""}delivered to ${o.branch}${o.commit ? ` (${o.commit.slice(0, 8)})` : ""}${o.pushed ? ", pushed" : ""}${o.pr_url ? `: ${o.pr_url}` : ""}`;
+
   let { repo, slug, onclose }: { repo: string; slug: string; onclose: () => void } = $props();
 
   let plan = $state<DeliveryPlan | null>(null);
@@ -21,8 +25,8 @@
   async function approve() {
     busy = true;
     try {
-      const o = await invoke<{ branch: string; commit: string | null; pushed: boolean; pr_url: string | null }>("deliver", { repo, slug });
-      result = `Delivered to ${o.branch}${o.commit ? ` (${o.commit.slice(0, 8)})` : ""}${o.pushed ? ", pushed" : ""}${o.pr_url ? `: ${o.pr_url}` : ""}`;
+      const o = await invoke<Outcome>("deliver", { repo, slug });
+      result = [o, ...o.related].filter((x) => x.commit || x.pushed).map(describe).join("\n") || "Nothing was committed.";
     } catch (e) {
       error = String(e);
     }
@@ -43,14 +47,17 @@
     {#if plan.mode === "none"}
       <p>Delivery is off for this repository (<code>[delivery] mode = "none"</code> in the Policy tab). The changes stay in your working tree.</p>
     {:else}
-      <p>
-        <b>{plan.mode}</b> to <code>{plan.branch}</code>{plan.create_branch ? " (new branch)" : ""} · {plan.files.length} file{plan.files.length === 1 ? "" : "s"}
-      </p>
-      <ul class="files">
-        {#each plan.files as f (f)}<li><code>{f}</code></li>{/each}
-      </ul>
-      <p class="meta">Kormilant will run:</p>
-      <pre>{plan.commands.join("\n")}</pre>
+      {#each [plan, ...plan.related].filter((p) => p.files.length) as p (p.repo)}
+        <p>
+          {#if p.repo}<b>{p.repo}</b> (member repo): {/if}<b>{p.mode}</b> to <code>{p.branch}</code>{p.create_branch ? " (new branch)" : ""} ·
+          {p.files.length} file{p.files.length === 1 ? "" : "s"}
+        </p>
+        <ul class="files">
+          {#each p.files as f (f)}<li><code>{f}</code></li>{/each}
+        </ul>
+        <p class="meta">Kormilant will run{p.repo ? ` in ${p.repo}` : ""}:</p>
+        <pre>{p.commands.join("\n")}</pre>
+      {/each}
       <p class="meta">Commit message:</p>
       <pre>{plan.message}</pre>
       <div class="actions">
@@ -99,6 +106,7 @@
     margin: 6px 0 0;
   }
   .ok {
+    white-space: pre-line;
     color: var(--good);
   }
   .actions {

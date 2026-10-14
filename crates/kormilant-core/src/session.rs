@@ -17,6 +17,7 @@ use crate::git;
 use crate::journal::{Journal, new_run_id};
 use crate::policy::{Agent, Budget, OnQuota, Policy, Worker};
 use crate::tasks::{self, StatusKind};
+use crate::workspace::{self, Member};
 use crate::watchdog::{Action, Alarm, PriorUsage, Watchdog};
 
 type Sink = Arc<dyn Fn(RunEvent) + Send + Sync>;
@@ -451,10 +452,24 @@ fn offer_delivery(repo: &std::path::Path, slug: &str, sink: &Sink) {
     match crate::delivery::plan(repo, slug, &policy) {
         Err(e) => sink(RunEvent::Info { message: format!("Not delivered: {e:#}") }),
         Ok(plan) if policy.delivery.approval == Approval::Auto => match crate::delivery::execute(repo, &plan) {
-            Ok(o) => sink(RunEvent::Delivered { branch: o.branch, commit: o.commit, pushed: o.pushed, pr_url: o.pr_url }),
+            Ok(o) => {
+                for m in &o.related {
+                    sink(RunEvent::Info { message: format!("{}: delivered to {}{}", m.repo, m.branch, m.pr_url.as_deref().map(|u| format!(" ({u})")).unwrap_or_default()) });
+                }
+                sink(RunEvent::Delivered { branch: o.branch, commit: o.commit, pushed: o.pushed, pr_url: o.pr_url })
+            }
             Err(e) => sink(RunEvent::Error { message: format!("Delivery failed: {e:#}") }),
         },
-        Ok(plan) => sink(RunEvent::DeliveryReady { mode: plan.mode, branch: plan.branch, files: plan.files, commands: plan.commands }),
+        Ok(plan) => {
+            // Member repos' files and commands, prefixed with the member's name.
+            let mut files = plan.files.clone();
+            let mut commands = plan.commands.clone();
+            for m in &plan.related {
+                files.extend(m.files.iter().map(|f| format!("{}/{f}", m.repo)));
+                commands.extend(m.commands.iter().map(|c| format!("{}: {c}", m.repo)));
+            }
+            sink(RunEvent::DeliveryReady { mode: plan.mode, branch: plan.branch, files, commands })
+        }
     }
 }
 
@@ -478,31 +493,88 @@ async fn run_agent(session: &Session, cfg: RunConfig, claude_model: Option<Strin
     session.wait_with_fallback(handle, cfg, claude_model, sink).await
 }
 
-/// Run the policy's build command, record it for delivery and report it. None when no command is set.
-async fn kormilant_build(
+/// One build of the round: the primary repo's (`member` None) or a member repo's.
+struct Built {
+    member: Option<String>,
+    command: String,
+    outcome: BuildOutcome,
+}
+
+/// Build the primary repo and each member repo that has a `[build] command` in its own policy.
+#[allow(clippy::too_many_arguments)]
+async fn build_all(
     session: &Session,
     policy: &Policy,
     repo: &std::path::Path,
+    members: &[Member],
     slug: &str,
     round: u32,
     run_dir: &std::path::Path,
     sink: &Sink,
-) -> anyhow::Result<Option<BuildOutcome>> {
+) -> anyhow::Result<Vec<Built>> {
+    let mut out = Vec::new();
+    if let Some(b) = kormilant_build(session, policy, repo, None, slug, round, run_dir, sink).await? {
+        out.push(b);
+    }
+    for m in members {
+        if session.cancelled() {
+            break;
+        }
+        let member_policy = Policy::load(&m.path).with_context(|| format!("member repo {}", m.name))?;
+        if let Some(b) = kormilant_build(session, &member_policy, &m.path, Some(&m.name), slug, round, run_dir, sink).await? {
+            out.push(b);
+        }
+    }
+    Ok(out)
+}
+
+/// The builds as the reviewer sees them, and whether all are green. None when nothing was built.
+fn build_summary(builds: &[Built]) -> Option<BuildSummary> {
+    let label = |b: &Built| match &b.member {
+        Some(m) => format!("{m}: {}", b.command),
+        None => b.command.clone(),
+    };
+    let shown = builds.iter().find(|b| !b.outcome.ok).or(builds.last())?;
+    Some(BuildSummary {
+        ok: builds.iter().all(|b| b.outcome.ok),
+        command: builds.iter().map(label).collect::<Vec<_>>().join(" ; "),
+        tail: format!("{}\n{}", label(shown), shown.outcome.tail),
+    })
+}
+
+/// Run a repo's build command, record it for delivery and report it. None when no command is set.
+#[allow(clippy::too_many_arguments)]
+async fn kormilant_build(
+    session: &Session,
+    policy: &Policy,
+    repo: &std::path::Path,
+    member: Option<&str>,
+    slug: &str,
+    round: u32,
+    run_dir: &std::path::Path,
+    sink: &Sink,
+) -> anyhow::Result<Option<Built>> {
     let Some(command) = &policy.build.command else { return Ok(None) };
     build::check_requires(&policy.build.requires)?;
-    let log = run_dir.join(format!("build-{round}.log"));
+    let log = match member {
+        Some(m) => run_dir.join(format!("build-{round}-{m}.log")),
+        None => run_dir.join(format!("build-{round}.log")),
+    };
+    if member.is_some() {
+        crate::claude::exclude_ai_tasks(repo); // the build record goes to the member's .ai-tasks/
+    }
     let outcome = build::run_build(repo, command, &log, &session.inner.cancel).await?;
     let tree = git::tree_of(repo, &git::snapshot(repo)?)?;
     let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     crate::delivery::record_build(repo, slug, &crate::delivery::LastBuild { ok: outcome.ok, command: command.clone(), tree, ts_ms })?;
     sink(RunEvent::Build {
         ok: outcome.ok,
-        command: command.clone(),
+        command: member.map_or_else(|| command.clone(), |m| format!("{m}: {command}")),
         duration_ms: outcome.duration_ms,
         tail: outcome.tail.clone(),
         log: outcome.log.display().to_string(),
     });
-    Ok(Some(outcome))
+    Ok(Some(Built { member: member.map(String::from), command: command.clone(), outcome }))
 }
 
 async fn run_loop(
@@ -519,9 +591,16 @@ async fn run_loop(
     let first = git::list_checkpoints(repo, slug)?.last().map(|c| c.round).unwrap_or(0);
     let mut rounds_done = 0u32;
     let mut round = first;
-    let mut last_build: Option<BuildOutcome> = None;
+    // None: not built in this loop yet.
+    let mut builds: Option<Vec<Built>> = None;
     if let Some(message) = crate::delivery::start_branch(repo, slug, &policy.delivery)? {
         sink(RunEvent::Info { message });
+    }
+    let members = workspace::members(repo, slug);
+    for m in &members {
+        if let Some(message) = crate::delivery::start_branch(&m.path, slug, &policy.delivery)? {
+            sink(RunEvent::Info { message: format!("{}: {message}", m.name) });
+        }
     }
 
     loop {
@@ -539,9 +618,13 @@ async fn run_loop(
                 round = first + rounds_done;
                 sink(RunEvent::Phase { round, role: "implementer".into() });
                 let git_ref = git::checkpoint(repo, slug, round)?;
+                for m in &members {
+                    git::checkpoint(&m.path, slug, round).with_context(|| format!("checkpoint in member repo {}", m.name))?;
+                }
                 sink(RunEvent::Checkpoint { round, git_ref });
 
                 let head_before = git::head(repo)?;
+                let member_heads = members.iter().map(|m| git::head(&m.path)).collect::<anyhow::Result<Vec<_>>>()?;
                 let mode = Mode::Implement { round, build_command: policy.build.command.clone() };
                 let ok = run_agent(session, cfg.agent(session, policy, repo, mode, session.remaining_usd()), cfg.model.clone(), sink).await?;
                 if session.cancelled() {
@@ -549,6 +632,11 @@ async fn run_loop(
                 }
                 if git::head(repo)? != head_before {
                     bail!("HEAD moved during the implement round (a commit, checkout or reset happened). Stopped; checkpoint {round} holds the state before the round.");
+                }
+                for (m, before) in members.iter().zip(&member_heads) {
+                    if git::head(&m.path)? != *before {
+                        bail!("HEAD moved in member repo {} during the implement round. Stopped; checkpoint {round} holds the state before the round.", m.name);
+                    }
                 }
                 if !ok {
                     bail!("The implementer did not finish round {round}.");
@@ -558,7 +646,7 @@ async fn run_loop(
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }
-                last_build = kormilant_build(session, policy, repo, slug, round, run_dir, sink).await?;
+                builds = Some(build_all(session, policy, repo, &members, slug, round, run_dir, sink).await?);
                 if session.cancelled() {
                     return Ok("Stopped by the human.".into());
                 }
@@ -577,25 +665,37 @@ async fn run_loop(
                         .or(git::head(repo)?)
                         .context("nothing to diff against: no checkpoint and no commits")?,
                 };
-                let patch = git::diff(repo, &base)?;
+                let mut patch = git::diff(repo, &base)?;
+                for m in &members {
+                    if let Some(b) = workspace::base(m, slug)? {
+                        patch.push('\n');
+                        patch.push_str(&git::diff_as(&m.path, &b, &m.name)?);
+                    }
+                }
                 let diff_file = run_dir.join(format!("diff-{review_round}.patch"));
                 std::fs::write(&diff_file, &patch)?;
                 let diff_path = diff_file.strip_prefix(repo).unwrap_or(&diff_file).display().to_string();
 
                 // Work done outside the loop (e.g. by hand) is built before the review too.
-                if last_build.is_none() && policy.build.command.is_some() {
-                    last_build = kormilant_build(session, policy, repo, slug, review_round, run_dir, sink).await?;
+                if builds.is_none() {
+                    builds = Some(build_all(session, policy, repo, &members, slug, review_round, run_dir, sink).await?);
                     if session.cancelled() {
                         return Ok("Stopped by the human.".into());
                     }
                 }
-                let build = match (&policy.build.command, &last_build) {
-                    (Some(command), Some(b)) => Some(BuildSummary { ok: b.ok, command: command.clone(), tail: b.tail.clone() }),
-                    _ => None,
-                };
+                let build = builds.as_deref().and_then(build_summary);
+                let build_ok = build.as_ref().map(|b| b.ok);
                 let reviewed = git::reviewed_ref(slug);
                 let changed_since_last_review = match git::resolve(repo, &reviewed) {
-                    Some(_) => Some(git::changed_since(repo, &reviewed)?),
+                    Some(_) => {
+                        let mut changed = git::changed_since(repo, &reviewed)?;
+                        for m in &members {
+                            if git::resolve(&m.path, &reviewed).is_some() {
+                                changed.extend(git::changed_since(&m.path, &reviewed)?.into_iter().map(|f| format!("{}/{f}", m.name)));
+                            }
+                        }
+                        Some(changed)
+                    }
                     None => None,
                 };
                 let mode = Mode::Review { round: review_round, diff_path, build, changed_since_last_review };
@@ -608,9 +708,12 @@ async fn run_loop(
                 }
 
                 git::mark_reviewed(repo, slug)?;
+                for m in &members {
+                    git::mark_reviewed(&m.path, slug)?;
+                }
                 archive_reviews(repo, slug, sink)?;
                 let reviewer_status = status_of(repo, slug)?;
-                let (status, reason) = gate_status(reviewer_status, last_build.as_ref().map(|b| b.ok));
+                let (status, reason) = gate_status(reviewer_status, build_ok);
                 if status != reviewer_status {
                     tasks::set_status(repo, slug, status)?;
                 }
@@ -627,6 +730,21 @@ async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_summary_covers_every_repo() {
+        let built = |member: Option<&str>, ok: bool, tail: &str| Built {
+            member: member.map(String::from),
+            command: "make".into(),
+            outcome: BuildOutcome { ok, duration_ms: 1, tail: tail.into(), log: "x.log".into() },
+        };
+        assert!(build_summary(&[]).is_none());
+        let s = build_summary(&[built(None, true, "fine"), built(Some("lib"), false, "boom")]).unwrap();
+        assert!(!s.ok, "a red member build blocks Done");
+        assert_eq!(s.command, "make ; lib: make");
+        assert!(s.tail.starts_with("lib: make\nboom"));
+        assert!(build_summary(&[built(None, true, "ok")]).unwrap().ok);
+    }
 
     #[test]
     fn next_step_table() {

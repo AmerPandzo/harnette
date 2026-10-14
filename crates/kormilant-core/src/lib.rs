@@ -19,6 +19,7 @@ pub mod session;
 pub mod tasks;
 pub mod watch;
 pub mod watchdog;
+pub mod workspace;
 
 pub use agent::{RunHandle, start_run};
 pub use claude::{BuildSummary, Mode, RunConfig};

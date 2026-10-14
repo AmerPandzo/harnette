@@ -3,17 +3,19 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use kormilant_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
 use kormilant_core::review::{Criterion, Finding, parse_criteria, parse_findings};
 use kormilant_core::tasks::{self, Question, StatusKind, TaskSummary, expand_home};
 use kormilant_core::watch::{TaskWatcher, watch_tasks};
 use kormilant_core::attach;
+use kormilant_core::workspace;
 use kormilant_core::delivery::{self, Outcome, Plan};
 use kormilant_core::editor::{self, Editor};
 use kormilant_core::git::{self, Checkpoint};
 use kormilant_core::ledger::{self, Entry, Summary};
-use kormilant_core::watchdog::PriorUsage;
+use kormilant_core::watchdog::{Action, PriorUsage, Watchdog};
 use kormilant_core::claude::{self, CHAT_SLUG};
 use kormilant_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -91,29 +93,58 @@ struct ChatEvent<'a> {
     event: &'a RunEvent,
 }
 
-/// Chat events go out as `chat-event`. Each turn's result carries the turn's tokens but the chat's
-/// running cost, so the ledger gets the cost difference to the previous turn.
-fn chat_sink(app: AppHandle, repo: String, slug: String, chat: u64) -> impl Fn(RunEvent) + Send + Sync + 'static {
+/// Chat events go out as `chat-event`. Each turn's result carries the turn's tokens but the process's
+/// running cost, so the ledger and the watchdog get the cost difference to the previous turn.
+/// Budgets are the task's (`_chat` has its own); time budgets do not apply, a chat waits for you by design.
+fn chat_sink(app: AppHandle, repo: String, slug: String, chat: u64, dog: Watchdog) -> impl Fn(RunEvent) + Send + Sync + 'static {
     let last_usd = Mutex::new(0.0f64);
+    let dog = Mutex::new(dog);
     move |e: RunEvent| {
-        match &e {
-            RunEvent::Finished { new_tokens, cost_usd, .. } => {
+        let observed = match &e {
+            RunEvent::Finished { ok, result, cost_usd, input_tokens, output_tokens, new_tokens, duration_ms } => {
                 let mut last = last_usd.lock().unwrap();
-                let entry = Entry {
-                    ts_ms: now_ms(),
-                    repo: repo.clone(),
-                    slug: slug.clone(),
-                    role: "chat".into(),
-                    new_tokens: *new_tokens,
-                    usd: (cost_usd - *last).max(0.0),
-                };
+                let usd = (cost_usd - *last).max(0.0);
                 *last = *cost_usd;
+                let entry = Entry { ts_ms: now_ms(), repo: repo.clone(), slug: slug.clone(), role: "chat".into(), new_tokens: *new_tokens, usd };
                 let _ = ledger::append(&ledger_path(&app), &entry);
+                let turn = RunEvent::Finished {
+                    ok: *ok,
+                    result: result.clone(),
+                    cost_usd: usd,
+                    input_tokens: *input_tokens,
+                    output_tokens: *output_tokens,
+                    new_tokens: *new_tokens,
+                    duration_ms: *duration_ms,
+                };
+                dog.lock().unwrap().observe(&turn, Instant::now())
             }
-            RunEvent::PermissionAsk { tool, summary, .. } => notify(&app, &format!("Kormilant chat: allow {tool}?"), summary),
-            _ => {}
+            other => dog.lock().unwrap().observe(other, Instant::now()),
+        };
+        if let RunEvent::PermissionAsk { tool, summary, .. } = &e {
+            notify(&app, &format!("Kormilant chat: allow {tool}?"), summary);
         }
         let _ = app.emit("chat-event", ChatEvent { chat, event: &e });
+        for alarm in observed {
+            let action = alarm.action.as_str();
+            let message = match alarm.action {
+                Action::Warn => alarm.message.clone(),
+                Action::Pause => format!("{} Stopped this answer; your next message continues the chat.", alarm.message),
+                Action::Stop => format!("{} Ended the chat.", alarm.message),
+            };
+            notify(&app, "Kormilant chat: budget", &message);
+            let event = RunEvent::Alarm { alarm: alarm.kind, message, action: action.into() };
+            let _ = app.emit("chat-event", ChatEvent { chat, event: &event });
+            let handle = app.state::<AppState>().chat.lock().unwrap().as_ref().filter(|c| c.id == chat).map(|c| c.handle.clone());
+            match (alarm.action, handle) {
+                (Action::Pause, Some(h)) => {
+                    tauri::async_runtime::spawn(async move {
+                        let _ = h.interrupt().await;
+                    });
+                }
+                (Action::Stop, Some(h)) => h.stop(),
+                _ => {}
+            }
+        }
     }
 }
 
@@ -257,12 +288,23 @@ fn task_review(repo: String, slug: String, base: String) -> Result<ReviewData, S
         "head" => (git::head(&repo).map_err(err)?.ok_or("no commits yet")?, "HEAD".into()),
         branch => (git::merge_base(&repo, branch).map_err(err)?, format!("merge-base with {branch}")),
     };
-    let files = git::numstat(&repo, &base_ref)
+    let mut files: Vec<FileStat> = git::numstat(&repo, &base_ref)
         .map_err(err)?
         .into_iter()
         .map(|(path, added, removed)| FileStat { path, added, removed })
         .collect();
     let mut patch = git::diff(&repo, &base_ref).map_err(err)?;
+    // Member repos: their changes since the task's first checkpoint there, paths prefixed with the member name.
+    for m in workspace::members(&repo, &slug) {
+        let Some(base) = workspace::base(&m, &slug).map_err(err)? else { continue };
+        files.extend(git::numstat(&m.path, &base).map_err(err)?.into_iter().map(|(path, added, removed)| FileStat {
+            path: format!("{}/{path}", m.name),
+            added,
+            removed,
+        }));
+        patch.push('\n');
+        patch.push_str(&git::diff_as(&m.path, &base, &m.name).map_err(err)?);
+    }
     let truncated = patch.len() > PATCH_LIMIT;
     if truncated {
         let cut = (0..=PATCH_LIMIT).rev().find(|i| patch.is_char_boundary(*i)).unwrap_or(0);
@@ -308,7 +350,15 @@ fn restore_checkpoint(state: State<'_, AppState>, repo: String, slug: String, ro
     if !tasks::valid_slug(&slug) {
         return Err("invalid slug".into());
     }
-    git::restore(&expand_home(&repo), &git::checkpoint_ref(&slug, round)).map_err(err)
+    let repo = expand_home(&repo);
+    let git_ref = git::checkpoint_ref(&slug, round);
+    git::restore(&repo, &git_ref).map_err(err)?;
+    for m in workspace::members(&repo, &slug) {
+        if git::resolve(&m.path, &git_ref).is_some() {
+            git::restore(&m.path, &git_ref).map_err(|e| format!("member repo {}: {e:#}", m.name))?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -320,6 +370,7 @@ fn answer_permission(state: State<'_, AppState>, request_id: String, allow: bool
 /// Send a chat message. Starts the chat's Claude process when there is none, or when the repo or
 /// task differs from the running chat's (that one is stopped). Returns the chat's number.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // one per command argument from the UI
 async fn chat_send(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -328,6 +379,7 @@ async fn chat_send(
     text: String,
     images: Option<Vec<String>>,
     model: Option<String>,
+    resume: Option<String>,
 ) -> Result<u64, String> {
     let images = assets(images)?;
     let path = expand_home(repo.trim());
@@ -352,7 +404,12 @@ async fn chat_send(
     let mut cfg = RunConfig::new(&path, &slug, Mode::Chat { message: text });
     cfg.model = model.filter(|m| !m.trim().is_empty());
     cfg.images = images;
-    let handle = claude::start(cfg, chat_sink(app, repo.clone(), slug.clone(), id)).await.map_err(err)?;
+    cfg.resume = resume.filter(|r| !r.trim().is_empty());
+    let (_, prior) = prior_usage(&app, &path, &slug);
+    let dog = Watchdog::new(Policy::load(&path).map_err(err)?.budget, prior, Instant::now());
+    // The CLI enforces the dollar budget as a hard cap per process.
+    cfg.max_budget_usd = dog.remaining_usd();
+    let handle = claude::start(cfg, chat_sink(app, repo.clone(), slug.clone(), id, dog)).await.map_err(err)?;
     state.chat.lock().unwrap().replace(Chat { handle, repo, slug, id });
     Ok(id)
 }

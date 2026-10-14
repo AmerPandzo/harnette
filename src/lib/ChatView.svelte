@@ -133,7 +133,7 @@
       </div>
     {/if}
     {#each sections as s, si (si)}
-      {#if si > 0 && s.kind === "agent"}<div class="mark center">New session: Claude does not remember the messages above</div>{/if}
+      {#if si > 0 && s.kind === "agent"}<div class="mark center">Reconnected: a new Claude process continues the conversation</div>{/if}
       {#each s.items as it, ii (ii)}
         {#if it.t === "note"}
           <div class="you">
@@ -187,11 +187,13 @@
             {#if t.waiting}<span class="right warn">waiting for you</span>
             {:else if t.decision?.allowed === false}<span class="right bad">denied{t.decision.rule ? `: ${t.decision.rule}` : ""}</span>{/if}
           </div>
+        {:else if it.t === "alarm"}
+          <div class="callout" class:bad={it.e.action !== "warn"}><Icon name="alert" size={14} /> {it.e.message}</div>
         {:else if it.t === "error"}
           <div class="callout bad"><Icon name="alert" size={14} /> {it.text}</div>
         {/if}
       {/each}
-      {#if s.exited && s.kind === "agent"}<div class="mark center">Claude's session ended. Your next message starts a new one.</div>{/if}
+      {#if s.exited && s.kind === "agent"}<div class="mark center">Claude's process ended. Your next message continues the conversation.</div>{/if}
     {/each}
     {#if chat.busy}<div class="mark"><span class="spinner"></span> Claude is answering…</div>{/if}
     {#each chat.asks as a (a.request_id)}

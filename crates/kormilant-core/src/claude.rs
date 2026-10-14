@@ -17,7 +17,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 use crate::attach;
 use crate::event::{Parsed, RunEvent, parse_line, summarize_tool};
 use crate::journal::{Journal, new_run_id};
-use crate::policy::{Policy, Role, Verdict, Worker};
+use crate::policy::{Policy, Role, RunDirs, Verdict, Worker};
 use crate::prompt;
 use crate::watchdog::PriorUsage;
 use crate::tasks;
@@ -83,6 +83,8 @@ pub struct RunConfig {
     pub images: Vec<String>,
     /// Related repos the run may read (`~` allowed). Empty: the task doc's `**Repos:**` line.
     pub related: Vec<String>,
+    /// Chat only: continue this Claude session (`--resume`), e.g. after the app restarted.
+    pub resume: Option<String>,
 }
 
 impl RunConfig {
@@ -101,6 +103,7 @@ impl RunConfig {
             prior: PriorUsage::default(),
             images: Vec::new(),
             related: Vec::new(),
+            resume: None,
         }
     }
 }
@@ -247,6 +250,9 @@ pub(crate) fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
     match &cfg.mode {
         Mode::Analyze { ticket } if ticket.trim().is_empty() => bail!("ticket text is empty"),
         Mode::Chat { message } if message.trim().is_empty() => bail!("message is empty"),
+        _ if cfg.resume.as_deref().is_some_and(|id| id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) => {
+            bail!("invalid session id to resume")
+        }
         Mode::Refine { .. } | Mode::Implement { .. } | Mode::Review { .. } if tasks::read(&cfg.repo, &cfg.slug).is_err() => {
             bail!("no task doc .ai-tasks/{}.md", cfg.slug)
         }
@@ -258,6 +264,7 @@ pub(crate) fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
 pub(crate) fn run_policy(cfg: &RunConfig, repo: &Path) -> anyhow::Result<Policy> {
     let mut policy = Policy::load(repo)?;
     policy.extra_read = tasks::related_dirs(repo, &related_names(cfg));
+    policy.extra_write = policy.extra_read.iter().filter(|d| crate::git::is_repo(d)).cloned().collect();
     Ok(policy)
 }
 
@@ -320,7 +327,8 @@ pub(crate) fn prompt_text(cfg: &RunConfig) -> String {
     }
     let related = related_names(cfg);
     if !related.is_empty() {
-        text.push_str(&prompt::related(&related, matches!(cfg.mode, Mode::Analyze { .. })));
+        let members = crate::workspace::members(&cfg.repo, &cfg.slug);
+        text.push_str(&prompt::related(&related, matches!(cfg.mode, Mode::Analyze { .. }), &members, cfg.mode.role()));
     }
     text
 }
@@ -369,7 +377,7 @@ where
         // User-level hooks and permission rules could decide prompts before we see them.
         .args(["--setting-sources", "project,local"])
         // kormilant-guard sees every tool call; anything it cannot allow or deny comes back to us as a prompt.
-        .args(["--settings", &guard_settings(&guard, &repo, role, &cfg.slug, &policy.extra_read, &policy.plugins.enabled)]);
+        .args(["--settings", &guard_settings(&guard, &repo, role, &cfg.slug, &RunDirs { read: policy.extra_read.clone(), write: policy.extra_write.clone() }, &policy.plugins.enabled)]);
     for dir in &policy.extra_read {
         cmd.arg("--add-dir").arg(dir);
     }
@@ -377,6 +385,9 @@ where
     if chat {
         let task = (cfg.slug != CHAT_SLUG).then_some(cfg.slug.as_str());
         cmd.args(["--append-system-prompt", &prompt::chat(task, &related_names(&cfg))]);
+        if let Some(id) = &cfg.resume {
+            cmd.args(["--resume", id]);
+        }
     }
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
@@ -536,7 +547,7 @@ pub(crate) fn scope_alarm(rule: &str, warned: &mut std::collections::HashSet<Str
     })
 }
 
-fn guard_settings(guard: &Path, repo: &Path, role: Role, slug: &str, read_dirs: &[PathBuf], plugins: &[String]) -> String {
+fn guard_settings(guard: &Path, repo: &Path, role: Role, slug: &str, dirs: &RunDirs, plugins: &[String]) -> String {
     let mut command = format!(
         "{} --repo {} --role {} --slug {}",
         sh_quote(&guard.display().to_string()),
@@ -544,8 +555,11 @@ fn guard_settings(guard: &Path, repo: &Path, role: Role, slug: &str, read_dirs: 
         role.as_str(),
         sh_quote(slug)
     );
-    for dir in read_dirs {
+    for dir in &dirs.read {
         command.push_str(&format!(" --read-dir {}", sh_quote(&dir.display().to_string())));
+    }
+    for dir in &dirs.write {
+        command.push_str(&format!(" --write-dir {}", sh_quote(&dir.display().to_string())));
     }
     let plugins: serde_json::Map<String, Value> = plugins.iter().map(|p| (p.clone(), Value::Bool(true))).collect();
     let mut settings = json!({ "hooks": { "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }] } });
@@ -619,7 +633,7 @@ mod tests {
     #[test]
     fn hook_command_quotes_paths() {
         assert_eq!(sh_quote("/a b/it's"), r#"'/a b/it'\''s'"#);
-        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/kormilant-guard"), Path::new("/my repo"), Role::Analyst, "T-1", &[], &[])).unwrap();
+        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/kormilant-guard"), Path::new("/my repo"), Role::Analyst, "T-1", &RunDirs::default(), &[])).unwrap();
         let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(cmd, "'/x/kormilant-guard' --repo '/my repo' --role analyst --slug 'T-1'");
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "*");
@@ -629,9 +643,9 @@ mod tests {
     #[test]
     fn settings_enable_listed_plugins() {
         let s: Value =
-            serde_json::from_str(&guard_settings(Path::new("/g"), Path::new("/r"), Role::Analyst, "T", &[PathBuf::from("/my lib")], &["ponytail@ponytail".into()])).unwrap();
+            serde_json::from_str(&guard_settings(Path::new("/g"), Path::new("/r"), Role::Analyst, "T", &RunDirs { read: vec![PathBuf::from("/my lib")], write: vec![PathBuf::from("/w")] }, &["ponytail@ponytail".into()])).unwrap();
         assert_eq!(s["enabledPlugins"], json!({ "ponytail@ponytail": true }));
         let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(cmd.ends_with("--slug 'T' --read-dir '/my lib'"), "{cmd}");
+        assert!(cmd.ends_with("--slug 'T' --read-dir '/my lib' --write-dir '/w'"), "{cmd}");
     }
 }

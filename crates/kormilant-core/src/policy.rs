@@ -351,6 +351,9 @@ pub struct Policy {
     /// Set per run, never from the file.
     #[serde(skip)]
     pub extra_read: Vec<PathBuf>,
+    /// The task's member repos (related git repos): the implementer may change them. Set per run.
+    #[serde(skip)]
+    pub extra_write: Vec<PathBuf>,
 }
 
 /// Claude Code plugins (and their skills) agents get. Runs skip user settings, so none load unless listed here.
@@ -628,7 +631,7 @@ impl Policy {
                 let Some(p) = field("file_path").or_else(|| field("notebook_path")) else {
                     return Verdict::Deny("write without a file path".into());
                 };
-                write_verdict(role, &resolve(repo, p), repo, &self.extra_read)
+                write_verdict(role, &resolve(repo, p), repo, &self.extra_read, &self.extra_write)
             }
             "Bash" => self.bash(field("command").unwrap_or_default(), repo),
             "WebFetch" | "WebSearch" => access(self.web.access, "web access"),
@@ -647,12 +650,16 @@ impl Policy {
             return verdict;
         };
         let full = resolve(repo, path);
-        let rel = full.strip_prefix(repo).unwrap_or(&full).to_string_lossy().replace('\\', "/");
-        if rel == format!(".ai-tasks/{slug}.md") {
+        // In a member repo, files are named `<rel>` or `<member folder>/<rel>`.
+        let member = self.extra_write.iter().find(|m| is_inside(&full, m));
+        let root = member.map_or(repo, PathBuf::as_path);
+        let rel = full.strip_prefix(root).unwrap_or(&full).to_string_lossy().replace('\\', "/");
+        if member.is_none() && rel == format!(".ai-tasks/{slug}.md") {
             return verdict;
         }
         let scope = crate::tasks::read(repo, slug).map(|d| task_scope(&d)).unwrap_or_default();
-        if scope.is_empty() || in_scope(&scope, &rel) {
+        let prefixed = member.and_then(|m| m.file_name()).map(|n| format!("{}/{rel}", n.to_string_lossy()));
+        if scope.is_empty() || in_scope(&scope, &rel) || prefixed.is_some_and(|p| in_scope(&scope, &p)) {
             return verdict;
         }
         match self.edits.on_out_of_scope {
@@ -771,7 +778,7 @@ pub fn in_scope(scope: &[String], rel: &str) -> bool {
     })
 }
 
-fn write_verdict(role: Role, path: &Path, repo: &Path, related: &[PathBuf]) -> Verdict {
+fn write_verdict(role: Role, path: &Path, repo: &Path, related: &[PathBuf], members: &[PathBuf]) -> Verdict {
     let tasks = repo.join(".ai-tasks");
     if path == policy_path(repo) {
         return Verdict::Deny("Agents may not change the Kormilant policy.".into());
@@ -804,6 +811,13 @@ fn write_verdict(role: Role, path: &Path, repo: &Path, related: &[PathBuf]) -> V
             }
         }
         Role::Implementer => {
+            if let Some(member) = members.iter().find(|m| is_inside(path, m)) {
+                return if is_inside(path, &member.join(".git")) {
+                    Verdict::Deny("Agents may not write inside .git/.".into())
+                } else {
+                    Verdict::Allow(format!("write inside member repo {}", member.display()))
+                };
+            }
             if !is_inside(path, repo) {
                 Verdict::Deny("Writes outside the repository are not allowed.".into())
             } else if is_inside(path, &repo.join(".git")) {
@@ -864,9 +878,15 @@ fn is_inside(path: &Path, dir: &Path) -> bool {
 pub const OUT_OF_SCOPE: &str = "outside the task scope";
 
 /// PreToolUse hook answer for `kormilant-guard`. Never fails open: any error asks the human.
-/// `read_dirs`: the task's related repos, readable like `repo`.
-pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, read_dirs: &[PathBuf], hook_input: &str) -> String {
-    let (decision, reason) = match decide_hook(repo, role, slug, read_dirs, hook_input) {
+/// Directories beyond the repo for one run: related repos (readable) and member repos (writable by the implementer).
+#[derive(Debug, Clone, Default)]
+pub struct RunDirs {
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, dirs: &RunDirs, hook_input: &str) -> String {
+    let (decision, reason) = match decide_hook(repo, role, slug, dirs, hook_input) {
         Ok(Verdict::Allow(rule)) => ("allow", rule),
         Ok(Verdict::Deny(reason)) => ("deny", reason),
         Ok(Verdict::Ask) => ("ask", "Kormilant asks the human supervisor.".to_string()),
@@ -882,12 +902,13 @@ pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, read_dirs: &[P
     .to_string()
 }
 
-fn decide_hook(repo: &Path, role: Role, slug: Option<&str>, read_dirs: &[PathBuf], hook_input: &str) -> anyhow::Result<Verdict> {
+fn decide_hook(repo: &Path, role: Role, slug: Option<&str>, dirs: &RunDirs, hook_input: &str) -> anyhow::Result<Verdict> {
     let v: Value = serde_json::from_str(hook_input).context("hook input is not JSON")?;
     let tool = v.get("tool_name").and_then(Value::as_str).context("hook input has no tool_name")?;
     let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
     let mut policy = Policy::load(repo)?;
-    policy.extra_read = read_dirs.to_vec();
+    policy.extra_read = dirs.read.clone();
+    policy.extra_write = dirs.write.clone();
     Ok(match slug {
         Some(slug) => policy.evaluate_task(role, tool, &input, repo, slug),
         None => policy.evaluate(role, tool, &input, repo),
@@ -1086,6 +1107,29 @@ mod tests {
     }
 
     #[test]
+    fn implementer_writes_member_repos() {
+        let p = Policy { extra_read: vec!["/work/lib".into(), "/work/docs".into()], extra_write: vec!["/work/lib".into()], ..Policy::default() };
+        let w = |role, path: &str| eval(&p, role, "Edit", json!({ "file_path": path }));
+        assert!(matches!(w(Role::Implementer, "/work/lib/src/x.rs"), Verdict::Allow(r) if r.contains("member")));
+        assert!(matches!(w(Role::Implementer, "/work/lib/.git/config"), Verdict::Deny(_)));
+        assert!(matches!(w(Role::Implementer, "/work/docs/x.md"), Verdict::Deny(_)), "not a member: read-only");
+        assert!(matches!(w(Role::Analyst, "/work/lib/src/x.rs"), Verdict::Deny(_)));
+        assert!(matches!(w(Role::Reviewer, "/work/lib/src/x.rs"), Verdict::Deny(_)));
+    }
+
+    #[test]
+    fn task_scope_covers_member_files() {
+        let dir = std::env::temp_dir().join(format!("kormilant-scope-member-{}", std::process::id()));
+        let lib = std::env::temp_dir().join(format!("kormilant-scope-lib-{}", std::process::id()));
+        crate::tasks::write(&dir, "T", &format!("Fix `{}/src/a.rs` and `src/main.rs`.", lib.file_name().unwrap().to_string_lossy())).unwrap();
+        let mut p = Policy::from_toml("[edits]\non_out_of_scope = \"block\"").unwrap();
+        p.extra_write = vec![lib.clone()];
+        let edit = |path: PathBuf| json!({ "file_path": path.display().to_string() });
+        assert!(matches!(p.evaluate_task(Role::Implementer, "Edit", &edit(lib.join("src/a.rs")), &dir, "T"), Verdict::Allow(_)));
+        assert!(matches!(p.evaluate_task(Role::Implementer, "Edit", &edit(lib.join("src/b.rs")), &dir, "T"), Verdict::Deny(_)));
+    }
+
+    #[test]
     fn related_repos_are_readable_not_writable() {
         let p = Policy { extra_read: vec![PathBuf::from("/work/lib")], ..Policy::default() };
         assert!(matches!(eval(&p, Role::Analyst, "Read", json!({ "file_path": "/work/lib/src/x.rs" })), Verdict::Allow(_)));
@@ -1138,7 +1182,7 @@ mod tests {
     #[test]
     fn hook_response_shapes() {
         let decision = |input: &str| -> String {
-            let out: Value = serde_json::from_str(&hook_response(Path::new("/nonexistent/repo"), Role::Analyst, None, &[], input)).unwrap();
+            let out: Value = serde_json::from_str(&hook_response(Path::new("/nonexistent/repo"), Role::Analyst, None, &RunDirs::default(), input)).unwrap();
             out["hookSpecificOutput"]["permissionDecision"].as_str().unwrap().to_string()
         };
         assert_eq!(decision(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#), "allow");

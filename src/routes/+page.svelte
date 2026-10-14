@@ -6,7 +6,7 @@
   import ActionDock from "$lib/ActionDock.svelte";
   import Board from "$lib/Board.svelte";
   import ChatView from "$lib/ChatView.svelte";
-  import { chat, initChatEvents } from "$lib/chat.svelte";
+  import { chat, initChatEvents, loadChat } from "$lib/chat.svelte";
   import Icon from "$lib/Icon.svelte";
   import NewAnalysis from "$lib/NewAnalysis.svelte";
   import DeliveryCard from "$lib/DeliveryCard.svelte";
@@ -28,8 +28,8 @@
   let chatTask = $state("");
 
   function openChat() {
-    // A fresh chat is about the task open on the board.
-    if (!chat.open && !chat.events.length) chatTask = selected ?? "";
+    // A fresh chat is about the task open on the board; a saved one keeps its task.
+    chatTask = chat.open || chat.events.length ? chat.task : (selected ?? "");
     tab = "chat";
   }
   let recent = $state<string[]>(JSON.parse(remembered("kormilant.recentRepos", "[]")));
@@ -68,6 +68,7 @@
       repoError = "";
       selected = null;
       remember("kormilant.repo", repo);
+      await loadChat(repo);
       recent = [repo, ...recent.filter((r) => r !== repo)].slice(0, 8);
       remember("kormilant.recentRepos", JSON.stringify(recent));
       await refresh();

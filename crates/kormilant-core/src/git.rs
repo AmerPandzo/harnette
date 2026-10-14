@@ -257,6 +257,13 @@ pub fn diff(repo: &Path, base: &str) -> anyhow::Result<String> {
 
 /// Put the working tree back to a checkpoint: restore its files and delete files added since.
 /// Ignored files are left alone; the user's index is not touched.
+/// `diff`, with paths shown as `<prefix>/<path>` (a member repo's changes inside the task's diff).
+pub fn diff_as(repo: &Path, base: &str, prefix: &str) -> anyhow::Result<String> {
+    let now = snapshot(repo)?;
+    let (src, dst) = (format!("--src-prefix=a/{prefix}/"), format!("--dst-prefix=b/{prefix}/"));
+    git(repo, ["diff", "--no-color", "--find-renames", &src, &dst, base, &now])
+}
+
 pub fn restore(repo: &Path, git_ref: &str) -> anyhow::Result<()> {
     let now = snapshot(repo)?;
     let added = git(repo, ["diff", "--name-only", "--no-renames", "--diff-filter=A", git_ref, &now])?;
@@ -287,6 +294,15 @@ pub(crate) mod tests {
         git(&repo, ["add", "-A"]).unwrap();
         git(&repo, ["commit", "-q", "-m", "init"]).unwrap();
         repo
+    }
+
+    #[test]
+    fn diff_as_prefixes_paths() {
+        let repo = temp_repo("diffas");
+        let base = head(&repo).unwrap().unwrap();
+        fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let d = diff_as(&repo, &base, "lib").unwrap();
+        assert!(d.contains("--- a/lib/a.txt") && d.contains("+++ b/lib/a.txt"), "{d}");
     }
 
     #[test]

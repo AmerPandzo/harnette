@@ -72,6 +72,8 @@ export type RunEvent =
   | { kind: "delivered"; branch: string; commit: string | null; pushed: boolean; pr_url: string | null };
 
 export type DeliveryPlan = {
+  /** Member repo name; "" for the primary repo. */
+  repo: string;
   slug: string;
   mode: string;
   branch: string;
@@ -81,6 +83,8 @@ export type DeliveryPlan = {
   pr_title: string;
   pr_body: string;
   commands: string[];
+  /** Member repos with changes, delivered after the primary repo. */
+  related: DeliveryPlan[];
 };
 
 export type UsageSummary = {

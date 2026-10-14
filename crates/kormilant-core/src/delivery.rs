@@ -42,6 +42,10 @@ fn read_last_build(repo: &Path, slug: &str) -> Option<LastBuild> {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Plan {
+    /// Member repo name; empty for the primary repo.
+    pub repo: String,
+    /// Where the commands run.
+    pub path: PathBuf,
     pub slug: String,
     pub mode: String,
     /// Changes since this ref are delivered (the task's first checkpoint).
@@ -54,14 +58,19 @@ pub struct Plan {
     pub pr_body: String,
     /// The exact commands `execute` runs, for the approval card.
     pub commands: Vec<String>,
+    /// Member repos with changes, delivered after this one with the same settings.
+    pub related: Vec<Plan>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Outcome {
+    /// Member repo name; empty for the primary repo.
+    pub repo: String,
     pub branch: String,
     pub commit: Option<String>,
     pub pushed: bool,
     pub pr_url: Option<String>,
+    pub related: Vec<Outcome>,
 }
 
 pub fn is_protected(branch: &str, patterns: &[String]) -> bool {
@@ -147,8 +156,8 @@ pub fn start_branch(repo: &Path, slug: &str, d: &Delivery) -> anyhow::Result<Opt
 }
 
 /// Checks the gate and works out what delivery would do, without changing anything.
+/// Member repos (see `workspace`) with changes come along in `related`, with the same `[delivery]` settings.
 pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
-    let d: &Delivery = &policy.delivery;
     let md = tasks::read(repo, slug)?;
     let summary = tasks::parse(slug, &md);
     if summary.status_kind != StatusKind::Done {
@@ -165,7 +174,48 @@ pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
     if !git::is_repo(repo) {
         bail!("Not a git repository.");
     }
-    if let Some(command) = &policy.build.command {
+
+    let title = summary.title.clone();
+    let pr_title = match title.strip_prefix(slug) {
+        Some(rest) => format!("{slug}: {}", rest.trim_start_matches([' ', '—', '-', ':']).trim()),
+        None => format!("{slug}: {title}"),
+    };
+    let problem = section(&md, "Problem");
+    let first_para = problem.split("\n\n").next().unwrap_or("").trim().to_string();
+    let texts = Texts {
+        message: format!("{pr_title}\n\n{first_para}\n\nKormilant task: {slug}"),
+        pr_body: format!(
+            "## Problem\n\n{problem}\n\n## Implementation notes\n\n{}\n\n## Review\n\n{}\n\n---\nDelivered by Kormilant (task `{slug}`).",
+            section(&md, "Implementation notes"),
+            latest_review(&md)
+        ),
+        pr_title,
+    };
+
+    let mut primary = repo_plan(repo, "", slug, &policy.delivery, policy.build.command.as_ref(), &texts)?;
+    for m in crate::workspace::members(repo, slug) {
+        let member_policy = Policy::load(&m.path).with_context(|| format!("member repo {}", m.name))?;
+        let p = repo_plan(&m.path, &m.name, slug, &policy.delivery, member_policy.build.command.as_ref(), &texts)
+            .with_context(|| format!("member repo {}", m.name))?;
+        if !p.files.is_empty() {
+            primary.related.push(p);
+        }
+    }
+    if policy.delivery.mode != DeliveryMode::None && primary.files.is_empty() && primary.related.is_empty() {
+        bail!("Nothing to deliver: no files changed since the task started.");
+    }
+    Ok(primary)
+}
+
+struct Texts {
+    message: String,
+    pr_title: String,
+    pr_body: String,
+}
+
+/// One repository's part of the plan: its build gate, base, changed files, branch and commands.
+fn repo_plan(repo: &Path, name: &str, slug: &str, d: &Delivery, build_command: Option<&String>, texts: &Texts) -> anyhow::Result<Plan> {
+    if let Some(command) = build_command {
         let last = read_last_build(repo, slug).with_context(|| format!("No Kormilant build recorded for {slug}; run the loop first."))?;
         if !last.ok {
             bail!("The last build (`{}`) is red.", last.command);
@@ -193,26 +243,13 @@ pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
         Some(b) if !is_protected(b, &d.protected) => (b.clone(), false),
         _ => (task_branch, true),
     };
-    if create_branch && branch_exists(repo, &branch) && d.mode != DeliveryMode::None {
+    let delivering = d.mode != DeliveryMode::None && !files.is_empty();
+    if create_branch && branch_exists(repo, &branch) && delivering {
         bail!("Branch {branch} already exists. Switch to it, or delete it, and deliver again.");
     }
     if is_protected(&branch, &d.protected) {
         bail!("{branch} is protected; set delivery.branch to a non-protected name.");
     }
-
-    let title = summary.title.clone();
-    let pr_title = match title.strip_prefix(slug) {
-        Some(rest) => format!("{slug}: {}", rest.trim_start_matches([' ', '—', '-', ':']).trim()),
-        None => format!("{slug}: {title}"),
-    };
-    let problem = section(&md, "Problem");
-    let first_para = problem.split("\n\n").next().unwrap_or("").trim().to_string();
-    let message = format!("{pr_title}\n\n{first_para}\n\nKormilant task: {slug}");
-    let pr_body = format!(
-        "## Problem\n\n{problem}\n\n## Implementation notes\n\n{}\n\n## Review\n\n{}\n\n---\nDelivered by Kormilant (task `{slug}`).",
-        section(&md, "Implementation notes"),
-        latest_review(&md)
-    );
 
     let mode = match d.mode {
         DeliveryMode::None => "none",
@@ -221,10 +258,7 @@ pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
         DeliveryMode::Pr => "pr",
     };
     let mut commands = Vec::new();
-    if d.mode != DeliveryMode::None {
-        if files.is_empty() {
-            bail!("Nothing to deliver: no files changed since the task started.");
-        }
+    if delivering {
         if create_branch {
             commands.push(format!("create branch {} there and switch to it (working tree untouched)", quote(&branch)));
         }
@@ -232,24 +266,48 @@ pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
             "commit the task's changes since {base} ({} file{}) as {}",
             files.len(),
             if files.len() == 1 { "" } else { "s" },
-            quote(&pr_title)
+            quote(&texts.pr_title)
         ));
-    }
-    if matches!(d.mode, DeliveryMode::Push | DeliveryMode::Pr) {
-        // Never --force, whatever delivery.force_push says.
-        commands.push(format!("git push -u origin {}", quote(&branch)));
-    }
-    if d.mode == DeliveryMode::Pr {
-        commands.push(format!("gh pr create --head {} --title {} --body-file <PR body>", quote(&branch), quote(&pr_title)));
+        if matches!(d.mode, DeliveryMode::Push | DeliveryMode::Pr) {
+            // Never --force, whatever delivery.force_push says.
+            commands.push(format!("git push -u origin {}", quote(&branch)));
+        }
+        if d.mode == DeliveryMode::Pr {
+            commands.push(format!("gh pr create --head {} --title {} --body-file <PR body>", quote(&branch), quote(&texts.pr_title)));
+        }
     }
 
-    Ok(Plan { slug: slug.to_string(), mode: mode.into(), base, branch, create_branch, files, message, pr_title, pr_body, commands })
+    Ok(Plan {
+        repo: name.to_string(),
+        path: repo.to_path_buf(),
+        slug: slug.to_string(),
+        mode: mode.into(),
+        base,
+        branch,
+        create_branch,
+        files,
+        message: texts.message.clone(),
+        pr_title: texts.pr_title.clone(),
+        pr_body: texts.pr_body.clone(),
+        commands,
+        related: Vec::new(),
+    })
 }
 
-/// Runs a plan made by `plan` (call `plan` again right before, so the gate is fresh).
+/// Runs a plan made by `plan` (call `plan` again right before, so the gate is fresh): the primary repo,
+/// then each member repo.
 pub fn execute(repo: &Path, plan: &Plan) -> anyhow::Result<Outcome> {
-    let mut outcome = Outcome { branch: plan.branch.clone(), commit: None, pushed: false, pr_url: None };
-    if plan.mode == "none" {
+    let mut outcome = execute_one(repo, plan)?;
+    for p in &plan.related {
+        outcome.related.push(execute_one(&p.path, p).with_context(|| format!("member repo {}", p.repo))?);
+    }
+    Ok(outcome)
+}
+
+fn execute_one(repo: &Path, plan: &Plan) -> anyhow::Result<Outcome> {
+    let mut outcome =
+        Outcome { repo: plan.repo.clone(), branch: plan.branch.clone(), commit: None, pushed: false, pr_url: None, related: Vec::new() };
+    if plan.mode == "none" || plan.files.is_empty() {
         return Ok(outcome);
     }
     // Commit only the task's own changes on top of HEAD; the user's earlier uncommitted work
@@ -481,6 +539,38 @@ mod tests {
         let p2 = plan(&repo, "T-2", &policy(DeliveryMode::Commit, None)).unwrap();
         assert!(execute(&repo, &p2).unwrap_err().to_string().contains("overlap"));
         fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn member_repos_are_delivered_with_the_task() {
+        let repo = setup("primary-of-member", "");
+        let lib = crate::git::tests::temp_repo("delivery-member");
+        user_git(&lib, &["config", "user.name", "Test User"]).unwrap();
+        user_git(&lib, &["config", "user.email", "user@example.com"]).unwrap();
+        let unchanged = crate::git::tests::temp_repo("delivery-unchanged");
+        tasks::write(&repo, "T-1", &DONE.replace("**Status:** Done", &format!("**Status:** Done\n\n**Repos:** {}, {}", lib.display(), unchanged.display())))
+            .unwrap();
+        git::checkpoint(&lib, "T-1", 1).unwrap();
+        git::checkpoint(&unchanged, "T-1", 1).unwrap();
+        fs::write(lib.join("a.txt"), "lib fixed\n").unwrap();
+
+        let p = plan(&repo, "T-1", &policy(DeliveryMode::Commit, None)).unwrap();
+        assert_eq!(p.related.len(), 1, "a member without changes is skipped");
+        assert_eq!(p.related[0].files, vec!["a.txt"]);
+        assert_eq!(p.related[0].repo, lib.file_name().unwrap().to_string_lossy());
+
+        let out = execute(&repo, &p).unwrap();
+        assert!(out.commit.is_some() && out.related[0].commit.is_some());
+        assert_eq!(user_git(&lib, &["show", "--name-only", "--format=", "HEAD"]).unwrap(), "a.txt");
+        assert!(git::resolve(&lib, &git::delivered_ref("T-1")).is_some());
+
+        // Only the member changed now: still something to deliver.
+        fs::write(lib.join("a.txt"), "lib again\n").unwrap();
+        let p2 = plan(&repo, "T-1", &policy(DeliveryMode::Commit, None)).unwrap();
+        assert!(p2.files.is_empty() && p2.related.len() == 1 && p2.commands.is_empty());
+        for dir in [repo, lib, unchanged] {
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
