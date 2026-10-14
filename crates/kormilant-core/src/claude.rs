@@ -34,7 +34,13 @@ pub enum Mode {
     Implement { round: u32, build_command: Option<String> },
     /// Fresh-session review of the change against the task doc.
     Review { round: u32, diff_path: String, build: Option<BuildSummary>, changed_since_last_review: Option<Vec<String>> },
+    /// Free-form conversation with the human; the process stays up for follow-ups (`Handle::say`).
+    /// The slug is the task it is about, or `CHAT_SLUG`.
+    Chat { message: String },
 }
+
+/// Journal and attachment slug of a chat that is not about a task.
+pub const CHAT_SLUG: &str = "_chat";
 
 /// What the reviewer is told about Kormilant's own build.
 #[derive(Debug, Clone)]
@@ -50,6 +56,7 @@ impl Mode {
             Mode::Analyze { .. } | Mode::Refine { .. } => Role::Analyst,
             Mode::Implement { .. } => Role::Implementer,
             Mode::Review { .. } => Role::Reviewer,
+            Mode::Chat { .. } => Role::Chat,
         }
     }
 }
@@ -74,6 +81,8 @@ pub struct RunConfig {
     pub prior: PriorUsage,
     /// Images attached to the first message (repo-relative, see `attach`).
     pub images: Vec<String>,
+    /// Related repos the run may read (`~` allowed). Empty: the task doc's `**Repos:**` line.
+    pub related: Vec<String>,
 }
 
 impl RunConfig {
@@ -91,6 +100,7 @@ impl RunConfig {
             max_budget_usd: None,
             prior: PriorUsage::default(),
             images: Vec::new(),
+            related: Vec::new(),
         }
     }
 }
@@ -135,6 +145,21 @@ impl Handle {
         write_line(&self.inner, &msg).await.context("the run has already finished")?;
         (self.inner.emit)(RunEvent::Note { text: text.to_string(), images: images.to_vec() });
         Ok(())
+    }
+
+    /// Next message of a chat, as the human wrote it.
+    pub async fn say(&self, text: &str, images: &[String]) -> anyhow::Result<()> {
+        let content = attach::content(&self.inner.repo, text, images);
+        let msg = json!({ "type": "user", "message": { "role": "user", "content": content } });
+        write_line(&self.inner, &msg).await.context("the chat has ended")?;
+        (self.inner.emit)(RunEvent::Note { text: text.to_string(), images: images.to_vec() });
+        Ok(())
+    }
+
+    /// Stop the current turn; the process stays up for the next message.
+    pub async fn interrupt(&self) -> anyhow::Result<()> {
+        let msg = json!({ "type": "control_request", "request_id": format!("int-{}", new_run_id()), "request": { "subtype": "interrupt" } });
+        write_line(&self.inner, &msg).await.context("the chat has ended")
     }
 
     /// True once the agent process has exited.
@@ -221,11 +246,27 @@ pub(crate) fn validate(cfg: &RunConfig) -> anyhow::Result<()> {
     }
     match &cfg.mode {
         Mode::Analyze { ticket } if ticket.trim().is_empty() => bail!("ticket text is empty"),
+        Mode::Chat { message } if message.trim().is_empty() => bail!("message is empty"),
         Mode::Refine { .. } | Mode::Implement { .. } | Mode::Review { .. } if tasks::read(&cfg.repo, &cfg.slug).is_err() => {
             bail!("no task doc .ai-tasks/{}.md", cfg.slug)
         }
         _ => Ok(()),
     }
+}
+
+/// The repo's policy with the run's related repos readable.
+pub(crate) fn run_policy(cfg: &RunConfig, repo: &Path) -> anyhow::Result<Policy> {
+    let mut policy = Policy::load(repo)?;
+    policy.extra_read = tasks::related_dirs(repo, &related_names(cfg));
+    Ok(policy)
+}
+
+/// The run's related repos as written: `cfg.related`, else the task doc's `**Repos:**` line.
+fn related_names(cfg: &RunConfig) -> Vec<String> {
+    if !cfg.related.is_empty() {
+        return cfg.related.clone();
+    }
+    tasks::read(&cfg.repo, &cfg.slug).map(|md| tasks::related(&md)).unwrap_or_default()
 }
 
 /// Keep `.ai-tasks/` out of commits without touching the repo's tracked `.gitignore`.
@@ -267,12 +308,19 @@ fn sh_quote(s: &str) -> String {
 
 /// The first prompt for the run's mode.
 pub(crate) fn prompt_text(cfg: &RunConfig) -> String {
+    if let Mode::Chat { message } = &cfg.mode {
+        return message.clone(); // the human's own words; the chat's context goes in the system prompt
+    }
     let mut text = mode_prompt(cfg);
     let assets = attach::assets_dir(&cfg.slug);
     if !matches!(cfg.mode, Mode::Analyze { .. }) && cfg.repo.join(&assets).is_dir() {
         text.push_str(&format!(
             "\n\nImages the human attached to this task are in `{assets}/`. Open the ones the task doc links (or that look relevant) with Read."
         ));
+    }
+    let related = related_names(cfg);
+    if !related.is_empty() {
+        text.push_str(&prompt::related(&related, matches!(cfg.mode, Mode::Analyze { .. })));
     }
     text
 }
@@ -289,6 +337,7 @@ fn mode_prompt(cfg: &RunConfig) -> String {
         Mode::Review { round, diff_path, build, changed_since_last_review } => {
             prompt::review(&cfg.slug, *round, diff_path, build.as_ref(), changed_since_last_review.as_deref())
         }
+        Mode::Chat { message } => message.clone(),
     }
 }
 
@@ -298,7 +347,7 @@ where
 {
     validate(&cfg)?;
     let repo = cfg.repo.canonicalize()?;
-    let policy = Arc::new(Policy::load(&repo)?);
+    let policy = Arc::new(run_policy(&cfg, &repo)?);
     let role = cfg.mode.role();
     let ask_timeout = cfg.ask_timeout.unwrap_or(Duration::from_secs(policy.shell.ask_timeout_min * 60));
     let guard = find_guard(&cfg)?;
@@ -320,7 +369,15 @@ where
         // User-level hooks and permission rules could decide prompts before we see them.
         .args(["--setting-sources", "project,local"])
         // kormilant-guard sees every tool call; anything it cannot allow or deny comes back to us as a prompt.
-        .args(["--settings", &guard_settings(&guard, &repo, role, &cfg.slug)]);
+        .args(["--settings", &guard_settings(&guard, &repo, role, &cfg.slug, &policy.extra_read, &policy.plugins.enabled)]);
+    for dir in &policy.extra_read {
+        cmd.arg("--add-dir").arg(dir);
+    }
+    let chat = matches!(cfg.mode, Mode::Chat { .. });
+    if chat {
+        let task = (cfg.slug != CHAT_SLUG).then_some(cfg.slug.as_str());
+        cmd.args(["--append-system-prompt", &prompt::chat(task, &related_names(&cfg))]);
+    }
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
     }
@@ -356,6 +413,9 @@ where
     journal.lock().unwrap().raw(&json!({ "kormilant_prompt": text }).to_string());
     let first = json!({ "type": "user", "message": { "role": "user", "content": attach::content(&repo, &text, &cfg.images) } });
     write_line(&inner, &first).await?;
+    if chat {
+        emit(RunEvent::Note { text: text.clone(), images: cfg.images.clone() });
+    }
 
     let stderr_tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
     if let Some(stderr) = child.stderr.take() {
@@ -418,7 +478,7 @@ where
                                     (inner.emit)(alarm);
                                 }
                             }
-                            if finished {
+                            if finished && !chat {
                                 // Closing stdin lets the CLI exit cleanly after its result.
                                 inner.stdin.lock().await.take();
                             }
@@ -476,15 +536,23 @@ pub(crate) fn scope_alarm(rule: &str, warned: &mut std::collections::HashSet<Str
     })
 }
 
-fn guard_settings(guard: &Path, repo: &Path, role: Role, slug: &str) -> String {
-    let command = format!(
+fn guard_settings(guard: &Path, repo: &Path, role: Role, slug: &str, read_dirs: &[PathBuf], plugins: &[String]) -> String {
+    let mut command = format!(
         "{} --repo {} --role {} --slug {}",
         sh_quote(&guard.display().to_string()),
         sh_quote(&repo.display().to_string()),
         role.as_str(),
         sh_quote(slug)
     );
-    json!({ "hooks": { "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }] } }).to_string()
+    for dir in read_dirs {
+        command.push_str(&format!(" --read-dir {}", sh_quote(&dir.display().to_string())));
+    }
+    let plugins: serde_json::Map<String, Value> = plugins.iter().map(|p| (p.clone(), Value::Bool(true))).collect();
+    let mut settings = json!({ "hooks": { "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }] } });
+    if !plugins.is_empty() {
+        settings["enabledPlugins"] = Value::Object(plugins);
+    }
+    settings.to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -551,9 +619,19 @@ mod tests {
     #[test]
     fn hook_command_quotes_paths() {
         assert_eq!(sh_quote("/a b/it's"), r#"'/a b/it'\''s'"#);
-        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/kormilant-guard"), Path::new("/my repo"), Role::Analyst, "T-1")).unwrap();
+        let s: Value = serde_json::from_str(&guard_settings(Path::new("/x/kormilant-guard"), Path::new("/my repo"), Role::Analyst, "T-1", &[], &[])).unwrap();
         let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(cmd, "'/x/kormilant-guard' --repo '/my repo' --role analyst --slug 'T-1'");
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "*");
+        assert!(s.get("enabledPlugins").is_none(), "no plugins unless the policy lists them");
+    }
+
+    #[test]
+    fn settings_enable_listed_plugins() {
+        let s: Value =
+            serde_json::from_str(&guard_settings(Path::new("/g"), Path::new("/r"), Role::Analyst, "T", &[PathBuf::from("/my lib")], &["ponytail@ponytail".into()])).unwrap();
+        assert_eq!(s["enabledPlugins"], json!({ "ponytail@ponytail": true }));
+        let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.ends_with("--slug 'T' --read-dir '/my lib'"), "{cmd}");
     }
 }

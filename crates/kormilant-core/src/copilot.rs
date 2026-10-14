@@ -352,6 +352,9 @@ pub fn args(cfg: &RunConfig, policy: &Policy) -> Vec<String> {
     for verb in policy.git.denied() {
         args.extend(["--deny-tool".into(), format!("shell(git {verb})")]);
     }
+    for dir in &policy.extra_read {
+        args.extend(["--add-dir".into(), dir.display().to_string()]);
+    }
     args
 }
 
@@ -361,7 +364,7 @@ where
 {
     validate(&cfg)?;
     let repo = cfg.repo.canonicalize()?;
-    let policy = Arc::new(Policy::load(&repo)?);
+    let policy = Arc::new(crate::claude::run_policy(&cfg, &repo)?);
     let role = cfg.mode.role();
     let ask_timeout = cfg.ask_timeout.unwrap_or(Duration::from_secs(policy.shell.ask_timeout_min * 60));
     exclude_ai_tasks(&repo);

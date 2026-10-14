@@ -1,4 +1,4 @@
-//! PreToolUse hook for Claude Code: `kormilant-guard --repo <path> --role <role> [--slug <task>]`.
+//! PreToolUse hook for Claude Code: `kormilant-guard --repo <path> --role <role> [--slug <task>] [--read-dir <path>]…`.
 //! Reads the hook JSON on stdin and prints the policy decision. Never fails open.
 
 use std::io::Read;
@@ -10,11 +10,13 @@ fn main() {
     let mut repo = None;
     let mut role = Role::Analyst;
     let mut slug = None;
+    let mut read_dirs = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--repo" => repo = args.next().map(PathBuf::from),
             "--slug" => slug = args.next(),
+            "--read-dir" => read_dirs.extend(args.next().map(PathBuf::from)),
             "--role" => role = args.next().and_then(|r| r.parse().ok()).unwrap_or(Role::Analyst),
             _ => {}
         }
@@ -23,5 +25,5 @@ fn main() {
     let _ = std::io::stdin().read_to_string(&mut input);
     // Without a repo there is nothing to check against: hand the call to the human.
     let repo = repo.unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    println!("{}", hook_response(&repo, role, slug.as_deref(), &input));
+    println!("{}", hook_response(&repo, role, slug.as_deref(), &read_dirs, &input));
 }

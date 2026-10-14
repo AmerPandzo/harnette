@@ -91,6 +91,63 @@ Rules:
     )
 }
 
+/// System prompt of a chat. `task`: the task the human opened it from.
+pub fn chat(task: Option<&str>, related_repos: &[String]) -> String {
+    let about = match task {
+        Some(slug) => format!(
+            "The human opened this chat from task `{slug}`; its doc is `.ai-tasks/{slug}.md`. Read it before answering \
+             questions about the task."
+        ),
+        None => "The chat is about the repository in general.".to_string(),
+    };
+    let related = if related_repos.is_empty() { String::new() } else { related(related_repos, false) };
+    format!(
+        r#"You are chatting with the human inside Kormilant, a control plane for coding agents, in the repository in
+the current directory. {about}
+
+How Kormilant works: each task is `.ai-tasks/<slug>.md` (Problem, Analysis, Proposed fix, Acceptance criteria,
+Open questions, Review log). Its `**Status:**` line is its board column: Analysis, Ready for implementation,
+In review, Changes requested, Done. Runs are done by role agents (analyst writes the doc, implementer changes code,
+reviewer reviews), not by you.
+
+What you may do: read and search freely; edit task docs in `.ai-tasks/` directly. Other edits and unlisted commands
+ask the human first; git commands that change state are denied.
+
+Proposing board actions: when starting work would help, propose it; the app shows a button and the human decides.
+Write one fenced block per action, with the language `kormilant-action` and one JSON object:
+```kormilant-action
+{{"action": "run", "slug": "T-1"}}
+```
+Actions:
+- {{"action": "analyze", "slug": "<new slug>", "ticket": "<full ticket text for the analyst>"}}: new task, starts the analyst
+- {{"action": "refine", "slug": "<slug>", "message": "<what the analyst should change>"}}: analyst updates an existing doc
+- {{"action": "run", "slug": "<slug>"}}: implement → build → review loop (task should be Ready for implementation)
+- {{"action": "move", "slug": "<slug>", "status": "analysis|ready|in_review|changes_requested|done"}}: move the card
+Never say an action ran: it runs only if the human clicks it.
+
+Rules:
+- Run one plain command per Bash call: no pipes, `&&`, `;`, redirects or subshells.
+- If a tool call is denied, read the reason and continue without it.
+- Answer briefly and concretely, with `path:line` references where useful.{related}
+"#
+    )
+}
+
+/// The task spans other repositories too. `new_doc`: the analyst writes the doc and must record them.
+pub fn related(repos: &[String], new_doc: bool) -> String {
+    let list = repos.iter().map(|r| format!("- `{r}`")).collect::<Vec<_>>().join("\n");
+    let record = if new_doc {
+        format!("\nPut this line right under the Status line of the task doc: `**Repos:** {}`", repos.join(", "))
+    } else {
+        String::new()
+    };
+    format!(
+        "\n\nThis task also concerns these related repositories. You may read and search them freely (Read, Grep, Glob, \
+         `git -C <dir> log`), but you may not change them in this run; describe changes they need in the task doc, \
+         naming the repository.\n{list}{record}"
+    )
+}
+
 const COMMON_RULES: &str = "Rules:
 - Run one plain command per Bash call: no pipes, `&&`, `;`, redirects or subshells.
 - Never run git commands that change state (commit, push, reset, stash, checkout, rebase). Kormilant owns git.

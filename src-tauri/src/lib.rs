@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use kormilant_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
 use kormilant_core::review::{Criterion, Finding, parse_criteria, parse_findings};
-use kormilant_core::tasks::{self, Question, StatusKind, TaskSummary};
+use kormilant_core::tasks::{self, Question, StatusKind, TaskSummary, expand_home};
 use kormilant_core::watch::{TaskWatcher, watch_tasks};
 use kormilant_core::attach;
 use kormilant_core::delivery::{self, Outcome, Plan};
@@ -14,6 +14,7 @@ use kormilant_core::editor::{self, Editor};
 use kormilant_core::git::{self, Checkpoint};
 use kormilant_core::ledger::{self, Entry, Summary};
 use kormilant_core::watchdog::PriorUsage;
+use kormilant_core::claude::{self, CHAT_SLUG};
 use kormilant_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
@@ -21,7 +22,16 @@ use tauri_plugin_notification::NotificationExt;
 #[derive(Default)]
 struct AppState {
     run: Mutex<Option<Session>>,
+    chat: Mutex<Option<Chat>>,
     watcher: Mutex<Option<TaskWatcher>>,
+}
+
+/// The chat's Claude process and what it is about; runs beside any run.
+struct Chat {
+    handle: claude::Handle,
+    repo: String,
+    slug: String,
+    id: u64,
 }
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
@@ -72,6 +82,41 @@ fn session_sink(ctx: Ctx) -> impl Fn(RunEvent) + Send + Sync + 'static {
     }
 }
 
+/// Numbers chats, so the UI can drop late events of a chat it already replaced.
+static CHAT_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(serde::Serialize, Clone)]
+struct ChatEvent<'a> {
+    chat: u64,
+    event: &'a RunEvent,
+}
+
+/// Chat events go out as `chat-event`. Each turn's result carries the turn's tokens but the chat's
+/// running cost, so the ledger gets the cost difference to the previous turn.
+fn chat_sink(app: AppHandle, repo: String, slug: String, chat: u64) -> impl Fn(RunEvent) + Send + Sync + 'static {
+    let last_usd = Mutex::new(0.0f64);
+    move |e: RunEvent| {
+        match &e {
+            RunEvent::Finished { new_tokens, cost_usd, .. } => {
+                let mut last = last_usd.lock().unwrap();
+                let entry = Entry {
+                    ts_ms: now_ms(),
+                    repo: repo.clone(),
+                    slug: slug.clone(),
+                    role: "chat".into(),
+                    new_tokens: *new_tokens,
+                    usd: (cost_usd - *last).max(0.0),
+                };
+                *last = *cost_usd;
+                let _ = ledger::append(&ledger_path(&app), &entry);
+            }
+            RunEvent::PermissionAsk { tool, summary, .. } => notify(&app, &format!("Kormilant chat: allow {tool}?"), summary),
+            _ => {}
+        }
+        let _ = app.emit("chat-event", ChatEvent { chat, event: &e });
+    }
+}
+
 fn on_event(app: &AppHandle, event: RunEvent) {
     match &event {
         RunEvent::Alarm { message, action, .. } => {
@@ -96,14 +141,6 @@ fn on_event(app: &AppHandle, event: RunEvent) {
     let _ = app.emit("run-event", &event);
 }
 
-/// Accept `~/…` paths as typed in a terminal.
-fn expand_home(path: &str) -> PathBuf {
-    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest.trim_start_matches('/')),
-        _ => PathBuf::from(path),
-    }
-}
-
 fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
 }
@@ -120,6 +157,7 @@ async fn start_run(
     model: Option<String>,
     message: Option<String>,
     images: Option<Vec<String>>,
+    repos: Option<Vec<String>>,
 ) -> Result<(), String> {
     if busy(&state) {
         return Err("A run is already in progress.".into());
@@ -136,6 +174,7 @@ async fn start_run(
     cfg.model = model.filter(|m| !m.trim().is_empty());
     cfg.prior = prior;
     cfg.images = assets(images)?;
+    cfg.related = related_repos(repos.unwrap_or_default())?;
     let ctx = Ctx { app: app.clone(), repo: repo_key, slug, role: Mutex::new("analyst".into()) };
     let session = start_single(cfg, session_sink(ctx)).await.map_err(err)?;
     state.run.lock().unwrap().replace(session);
@@ -275,6 +314,62 @@ fn restore_checkpoint(state: State<'_, AppState>, repo: String, slug: String, ro
 #[tauri::command]
 fn answer_permission(state: State<'_, AppState>, request_id: String, allow: bool) -> bool {
     state.run.lock().unwrap().as_ref().is_some_and(|h| h.answer(&request_id, allow))
+        || state.chat.lock().unwrap().as_ref().is_some_and(|c| c.handle.answer(&request_id, allow))
+}
+
+/// Send a chat message. Starts the chat's Claude process when there is none, or when the repo or
+/// task differs from the running chat's (that one is stopped). Returns the chat's number.
+#[tauri::command]
+async fn chat_send(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    repo: String,
+    task: Option<String>,
+    text: String,
+    images: Option<Vec<String>>,
+    model: Option<String>,
+) -> Result<u64, String> {
+    let images = assets(images)?;
+    let path = expand_home(repo.trim());
+    let repo = path.canonicalize().unwrap_or_else(|_| path.clone()).display().to_string();
+    let slug = task.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| CHAT_SLUG.into());
+    let same = {
+        let mut chat = state.chat.lock().unwrap();
+        match chat.as_ref() {
+            Some(c) if !c.handle.is_finished() && c.repo == repo && c.slug == slug => Some((c.handle.clone(), c.id)),
+            _ => {
+                if let Some(old) = chat.take() {
+                    old.handle.stop();
+                }
+                None
+            }
+        }
+    };
+    if let Some((handle, id)) = same {
+        return handle.say(&text, &images).await.map(|_| id).map_err(err);
+    }
+    let id = CHAT_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let mut cfg = RunConfig::new(&path, &slug, Mode::Chat { message: text });
+    cfg.model = model.filter(|m| !m.trim().is_empty());
+    cfg.images = images;
+    let handle = claude::start(cfg, chat_sink(app, repo.clone(), slug.clone(), id)).await.map_err(err)?;
+    state.chat.lock().unwrap().replace(Chat { handle, repo, slug, id });
+    Ok(id)
+}
+
+/// Stop the chat's current answer; the chat stays open.
+#[tauri::command]
+async fn chat_interrupt(state: State<'_, AppState>) -> Result<(), String> {
+    let handle = state.chat.lock().unwrap().as_ref().map(|c| c.handle.clone()).ok_or("No chat is open.")?;
+    handle.interrupt().await.map_err(err)
+}
+
+/// End the chat (New chat): its process exits.
+#[tauri::command]
+fn chat_end(state: State<'_, AppState>) {
+    if let Some(c) = state.chat.lock().unwrap().take() {
+        c.handle.stop();
+    }
 }
 
 #[tauri::command]
@@ -374,6 +469,12 @@ fn save_answers(repo: String, slug: String, answers: Vec<(usize, String)>) -> Re
     tasks::save_answers(&expand_home(&repo), &slug, &answers).map_err(err)
 }
 
+/// Claude Code plugins installed on this machine, for the policy's `[plugins]` checkboxes.
+#[tauri::command]
+fn list_plugins() -> Vec<String> {
+    kormilant_core::policy::installed_plugins()
+}
+
 #[tauri::command]
 fn list_editors() -> Vec<Editor> {
     editor::installed()
@@ -388,6 +489,21 @@ fn open_in_editor(repo: String, path: String, line: Option<u32>, editor: String)
 #[tauri::command]
 fn write_task(repo: String, slug: String, content: String) -> Result<(), String> {
     tasks::write(&expand_home(&repo), &slug, &content).map_err(err)
+}
+
+/// Trimmed related repo paths, each an existing directory.
+fn related_repos(repos: Vec<String>) -> Result<Vec<String>, String> {
+    let repos: Vec<String> = repos.into_iter().map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
+    match repos.iter().find(|r| !expand_home(r).is_dir()) {
+        Some(r) => Err(format!("not a directory: {r}")),
+        None => Ok(repos),
+    }
+}
+
+/// Replace the task's `**Repos:**` line.
+#[tauri::command]
+fn set_task_repos(repo: String, slug: String, repos: Vec<String>) -> Result<(), String> {
+    tasks::set_related(&expand_home(&repo), &slug, &related_repos(repos)?).map_err(err)
 }
 
 #[tauri::command]
@@ -499,6 +615,9 @@ pub fn run() {
             deliver,
             answer_permission,
             send_note,
+            chat_send,
+            chat_interrupt,
+            chat_end,
             stop_run,
             pause_run,
             resume_run,
@@ -507,11 +626,13 @@ pub fn run() {
             list_tasks,
             read_task,
             list_editors,
+            list_plugins,
             task_questions,
             save_answers,
             open_in_editor,
             write_task,
             set_task_status,
+            set_task_repos,
             read_policy,
             save_policy,
             policy_form,
@@ -521,10 +642,14 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             // Quitting must not leave an agent running (or frozen by Pause) behind.
-            if let tauri::RunEvent::Exit = event
-                && let Some(session) = app.state::<AppState>().run.lock().unwrap().as_ref()
-            {
-                session.shutdown();
+            if let tauri::RunEvent::Exit = event {
+                let state = app.state::<AppState>();
+                if let Some(session) = state.run.lock().unwrap().as_ref() {
+                    session.shutdown();
+                }
+                if let Some(chat) = state.chat.lock().unwrap().as_ref() {
+                    chat.handle.kill_now();
+                }
             }
         });
 }

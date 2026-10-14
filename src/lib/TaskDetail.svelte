@@ -7,6 +7,7 @@
   import Icon from "./Icon.svelte";
   import OpenInEditor from "./OpenInEditor.svelte";
   import QuestionsPane from "./QuestionsPane.svelte";
+  import RepoList from "./RepoList.svelte";
   import ReviewPane from "./ReviewPane.svelte";
   import { editors } from "./editor.svelte";
   import { STATUS_LABELS, type Checkpoint, type StatusKind, type TaskSummary } from "./types";
@@ -116,6 +117,15 @@
     }
   }
 
+  async function setRepos(repos: string[]) {
+    try {
+      await invoke("set_task_repos", { repo, slug: task.slug, repos });
+      error = "";
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function setStatus(ev: Event) {
     const status = (ev.target as HTMLSelectElement).value as StatusKind;
     try {
@@ -193,6 +203,12 @@
   {#if error}<p class="error pad">{error}</p>{/if}
   {#if editors.error}<p class="error pad">{editors.error}</p>{/if}
   {#if changedOnDisk}<p class="warn">The doc changed on disk while you were editing. Saving overwrites that change.</p>{/if}
+  {#if !editing}
+    <div class="cps" title="Agents may read these repositories too (the doc's **Repos:** line)">
+      <span class="meta">Related repos</span>
+      {#key task.slug + task.repos.join()}<RepoList items={[...task.repos]} {repo} onchange={setRepos} />{/key}
+    </div>
+  {/if}
   {#if checkpoints.length > 0 && !editing}
     <div class="cps">
       <span class="meta">Checkpoints</span>

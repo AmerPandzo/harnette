@@ -255,6 +255,7 @@ where
         Mode::Refine { .. } => "Refine",
         Mode::Implement { .. } => "Implementation",
         Mode::Review { .. } => "Review",
+        Mode::Chat { .. } => "Chat",
     };
     let s2 = sink.clone();
     let handle = match start_run(cfg.clone(), move |e| s2(e)).await {
@@ -267,7 +268,16 @@ where
     session.inner.current.lock().unwrap().replace(handle.clone());
     let s = session.clone();
     tokio::spawn(async move {
-        let (ok, summary) = match s.wait_with_fallback(handle, cfg, claude_model, &sink).await {
+        let (repo, slug, related) = (cfg.repo.clone(), cfg.slug.clone(), cfg.related.clone());
+        let result = s.wait_with_fallback(handle, cfg, claude_model, &sink).await;
+        // The analyst is asked to record the related repos; make sure the doc has them either way.
+        if !related.is_empty()
+            && let Ok(md) = tasks::read(&repo, &slug)
+            && tasks::related(&md).is_empty()
+        {
+            let _ = tasks::set_related(&repo, &slug, &related);
+        }
+        let (ok, summary) = match result {
             Ok(true) => (true, format!("{label} finished")),
             Ok(false) => (false, format!("{label} did not finish")),
             Err(e) => (false, format!("{e:#}")),

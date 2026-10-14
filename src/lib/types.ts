@@ -13,6 +13,8 @@ export type TaskSummary = {
   blockers: number;
   open_questions: number;
   modified_ms: number;
+  /** Related repositories (the doc's `**Repos:**` line). */
+  repos: string[];
 };
 
 export const COLUMNS: { kind: StatusKind; label: string }[] = [

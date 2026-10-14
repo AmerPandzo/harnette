@@ -1,6 +1,7 @@
 <script lang="ts">
   import Attachments from "./Attachments.svelte";
   import Icon from "./Icon.svelte";
+  import RepoList from "./RepoList.svelte";
   import { upload, type Pending } from "./attach";
   import { run, startRun } from "./run.svelte";
   import { remember, remembered } from "./types";
@@ -12,6 +13,7 @@
   let ticket = $state("");
   let error = $state("");
   let images = $state<Pending[]>([]);
+  let repos = $state<string[]>([]);
   let sheet = $state<HTMLElement>();
   let attach = $state<Attachments>();
 
@@ -20,7 +22,7 @@
     remember("kormilant.model", model);
     try {
       const paths = await upload(repo, slug.trim(), images);
-      await startRun({ repo, slug: slug.trim(), mode: "analyze", ticket, model, images: paths });
+      await startRun({ repo, slug: slug.trim(), mode: "analyze", ticket, model, images: paths, repos });
       onstarted();
     } catch (e) {
       error = String(e);
@@ -61,6 +63,10 @@
       ></textarea></label
     >
     <Attachments bind:this={attach} bind:items={images} zone={sheet} />
+    <div class="related">
+      <span>Related repos <span class="hint">optional: other repos the agents may read for this task</span></span>
+      <RepoList bind:items={repos} {repo} />
+    </div>
     {#if error}<p class="error">{error}</p>{/if}
     <div class="foot">
       <span class="hint">Unlisted commands ask you first.</span>
@@ -73,6 +79,14 @@
 </div>
 
 <style>
+  .related {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--quiet);
+  }
   .scrim {
     position: fixed;
     inset: 0;

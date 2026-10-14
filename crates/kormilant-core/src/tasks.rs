@@ -54,9 +54,12 @@ pub struct TaskSummary {
     pub blockers: u32,
     pub open_questions: u32,
     pub modified_ms: u64,
+    /// Related repositories from the `**Repos:**` line, as written.
+    pub repos: Vec<String>,
 }
 
 const STATUS_PREFIX: &str = "**Status:**";
+const REPOS_PREFIX: &str = "**Repos:**";
 
 pub fn tasks_dir(repo: &Path) -> PathBuf {
     repo.join(".ai-tasks")
@@ -133,7 +136,63 @@ pub fn parse(slug: &str, md: &str) -> TaskSummary {
         blockers: findings.iter().filter(|b| **b).count() as u32,
         open_questions,
         modified_ms: 0,
+        repos: related(md),
     }
+}
+
+/// Related repositories a task may read: the `**Repos:** ~/a, /b` line, comma-separated.
+pub fn related(md: &str) -> Vec<String> {
+    md.lines()
+        .find_map(|l| l.trim_start().strip_prefix(REPOS_PREFIX))
+        .map(|rest| rest.split(',').map(|r| r.trim().trim_matches('`').to_string()).filter(|r| !r.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// `~/x` → `$HOME/x`; other paths unchanged.
+pub fn expand_home(path: &str) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// Related repos that exist, as canonical directories; `repo` itself is skipped.
+pub fn related_dirs(repo: &Path, repos: &[String]) -> Vec<PathBuf> {
+    let own = repo.canonicalize().ok();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in repos.iter().filter_map(|r| expand_home(r).canonicalize().ok()).filter(|d| d.is_dir()) {
+        if Some(&dir) != own.as_ref() && !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
+    out
+}
+
+/// Rewrite the `**Repos:**` line (inserted under the Status line; removed when `repos` is empty).
+pub fn with_related(md: &str, repos: &[String]) -> String {
+    let mut out: Vec<String> = md.lines().filter(|l| !l.trim_start().starts_with(REPOS_PREFIX)).map(String::from).collect();
+    if !repos.is_empty() {
+        let line = format!("{REPOS_PREFIX} {}", repos.join(", "));
+        let at = out
+            .iter()
+            .position(|l| l.trim_start().starts_with(STATUS_PREFIX))
+            .or_else(|| out.iter().position(|l| l.starts_with("# ")))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        out.splice(at..at, ["".to_string(), line]);
+    }
+    // Removing the line can leave two blank lines in a row.
+    out.dedup_by(|a, b| a.trim().is_empty() && b.trim().is_empty());
+    let mut s = out.join("\n");
+    if md.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
+pub fn set_related(repo: &Path, slug: &str, repos: &[String]) -> anyhow::Result<()> {
+    let md = read(repo, slug)?;
+    write(repo, slug, &with_related(&md, repos))
 }
 
 pub fn list(repo: &Path) -> anyhow::Result<Vec<TaskSummary>> {
@@ -370,6 +429,18 @@ pub fn save_answers(repo: &Path, slug: &str, answers: &[(usize, String)]) -> any
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn related_repos_round_trip() {
+        let md = "# T\n\n**Status:** Analysis\n\n## Problem\nx\n";
+        let with = with_related(md, &["~/a".into(), "/b c".into()]);
+        assert_eq!(with, "# T\n\n**Status:** Analysis\n\n**Repos:** ~/a, /b c\n\n## Problem\nx\n");
+        assert_eq!(related(&with), ["~/a", "/b c"]);
+        assert_eq!(parse("T", &with).repos, ["~/a", "/b c"]);
+        assert_eq!(related(&with_related(&with, &["/z".into()])), ["/z"]);
+        assert_eq!(with_related(&with, &[]), md, "removing the line restores the doc");
+        assert!(related("**Repos:** `~/x`,  ,y").iter().eq(["~/x", "y"].iter()));
+    }
 
     const DOC: &str = "# T-1 — Fix it\n\n**Status:** Changes requested (round 2)\n\n## Problem\nx\n\n## Acceptance criteria\n\n- [x] one\n- [ ] two\n  - [X] nested three\n\n## Open questions\n\n- Should we? Decided: yes\n- What about Y?\n1. And Z?\n\n## Review log\n\n### Review 1\n- [x] R1-1 [Major] done (a:1)\n- [ ] R1-2 [Blocker] broken (b:2)\n- [ ] R1-3 [Minor] nit\n- [ ] not a finding\n";
 

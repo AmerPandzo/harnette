@@ -5,6 +5,8 @@
   import { onMount } from "svelte";
   import ActionDock from "$lib/ActionDock.svelte";
   import Board from "$lib/Board.svelte";
+  import ChatView from "$lib/ChatView.svelte";
+  import { chat, initChatEvents } from "$lib/chat.svelte";
   import Icon from "$lib/Icon.svelte";
   import NewAnalysis from "$lib/NewAnalysis.svelte";
   import DeliveryCard from "$lib/DeliveryCard.svelte";
@@ -21,7 +23,15 @@
   let tasks = $state<TaskSummary[]>([]);
   let selected = $state<string | null>(null);
   let version = $state(0);
-  let tab = $state<"board" | "run" | "policy" | "maintenance">("board");
+  let tab = $state<"board" | "run" | "chat" | "policy" | "maintenance">("board");
+  /** Task the chat is about ("" = the repo). */
+  let chatTask = $state("");
+
+  function openChat() {
+    // A fresh chat is about the task open on the board.
+    if (!chat.open && !chat.events.length) chatTask = selected ?? "";
+    tab = "chat";
+  }
   let recent = $state<string[]>(JSON.parse(remembered("kormilant.recentRepos", "[]")));
   let showNew = $state(false);
   let repoMenu = $state(false);
@@ -104,6 +114,7 @@
 
   onMount(() => {
     initRunEvents();
+    initChatEvents();
     onRunExit(refresh);
     // Editors and agents write in bursts; coalesce into one refresh.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -152,6 +163,10 @@
         <Icon name="run" size={15} /> Run
         {#if run.running}<span class="live" class:warn={run.asks.length || run.paused}></span>{/if}
       </button>
+      <button class:on={tab === "chat"} onclick={openChat} disabled={!repo}>
+        <Icon name="chat" size={15} /> Chat
+        {#if chat.asks.length}<span class="live warn"></span>{:else if chat.busy}<span class="live"></span>{/if}
+      </button>
       <button class:on={tab === "policy"} onclick={() => (tab = "policy")} disabled={!repo}><Icon name="shield" size={15} /> Policy</button>
       <button class:on={tab === "maintenance"} onclick={() => (tab = "maintenance")}>
         <Icon name="gauge" size={15} /> Usage
@@ -183,7 +198,7 @@
   <main>
     <div class="topbar" data-tauri-drag-region>
       <h1 data-tauri-drag-region>
-        {({ board: "Board", run: "Run", policy: "Policy", maintenance: "Usage" } as const)[tab]}
+        {({ board: "Board", run: "Run", chat: "Chat", policy: "Policy", maintenance: "Usage" } as const)[tab]}
         {#if tab === "board" && repo}<span class="sub">{tasks.length} task{tasks.length === 1 ? "" : "s"} in <code>.ai-tasks/</code></span>{/if}
         {#if tab === "policy" && repo}<span class="sub"><code>.ai-tasks/policy.toml</code> · checked on every agent tool call</span>{/if}
       </h1>
@@ -217,6 +232,8 @@
             {/if}
           </div>
         {/if}
+      {:else if tab === "chat"}
+        <ChatView {repo} {tasks} bind:task={chatTask} onopen={(t) => (tab = t)} />
       {:else if tab === "policy"}
         <PolicyView {repo} />
       {:else if tab === "maintenance"}

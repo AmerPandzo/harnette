@@ -114,6 +114,8 @@ export async function startRun(args: {
   message?: string;
   /** Saved attachments (see attach.ts `upload`). */
   images?: string[];
+  /** Related repositories (analyze only; later runs read the doc). */
+  repos?: string[];
 }) {
   begin(args.slug, args.mode);
   await guarded(() =>
@@ -123,6 +125,7 @@ export async function startRun(args: {
       model: args.model || null,
       message: args.message?.trim() || null,
       images: args.images?.length ? args.images : null,
+      repos: args.repos?.length ? args.repos : null,
     }),
   );
 }

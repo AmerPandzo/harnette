@@ -26,6 +26,7 @@
     pause: "M8 5v14M16 5v14",
     stop: "M6 6h12v12H6z",
     send: "M4 12l16-8-6 16-2.5-6.5z",
+    chat: "M4 5h16v11H9l-5 4z",
     plus: "M12 5v14M5 12h14",
     flag: "M5 21V4M5 4h11l-2 4 2 4H5",
     book: "M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zM4 19V5",

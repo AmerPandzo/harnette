@@ -22,6 +22,8 @@ pub enum Role {
     Analyst,
     Implementer,
     Reviewer,
+    /// Free-form chat with the human: reads freely, writes task docs, asks for anything else.
+    Chat,
 }
 
 impl FromStr for Role {
@@ -31,6 +33,7 @@ impl FromStr for Role {
             "analyst" => Ok(Self::Analyst),
             "implementer" => Ok(Self::Implementer),
             "reviewer" => Ok(Self::Reviewer),
+            "chat" => Ok(Self::Chat),
             other => anyhow::bail!("unknown role {other:?}"),
         }
     }
@@ -42,6 +45,7 @@ impl Role {
             Self::Analyst => "analyst",
             Self::Implementer => "implementer",
             Self::Reviewer => "reviewer",
+            Self::Chat => "chat",
         }
     }
 }
@@ -116,6 +120,7 @@ impl Roles {
             Role::Analyst => &self.analyst,
             Role::Implementer => &self.implementer,
             Role::Reviewer => &self.reviewer,
+            Role::Chat => return Worker::claude(),
         };
         Worker::parse(spec).unwrap_or_default()
     }
@@ -341,6 +346,33 @@ pub struct Policy {
     pub run: RunLimits,
     pub delivery: Delivery,
     pub copilot: CopilotCfg,
+    pub plugins: Plugins,
+    /// Related repositories of the task being run (its `**Repos:**` line): read like the repo itself.
+    /// Set per run, never from the file.
+    #[serde(skip)]
+    pub extra_read: Vec<PathBuf>,
+}
+
+/// Claude Code plugins (and their skills) agents get. Runs skip user settings, so none load unless listed here.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Plugins {
+    /// `<name>@<marketplace>` ids, as in `~/.claude/plugins/installed_plugins.json`.
+    pub enabled: Vec<String>,
+}
+
+/// Plugin ids installed for Claude Code on this machine; empty when there is no plugin file.
+pub fn installed_plugins() -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    let text = std::fs::read_to_string(PathBuf::from(home).join(".claude/plugins/installed_plugins.json")).unwrap_or_default();
+    plugin_ids(&text)
+}
+
+fn plugin_ids(json: &str) -> Vec<String> {
+    let v: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+    let mut ids: Vec<String> = v.get("plugins").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    ids.sort();
+    ids
 }
 
 /// How Kormilant runs Copilot CLI.
@@ -428,6 +460,9 @@ branch_at_start = false       # true: the app switches to the task branch when a
 model = "claude-sonnet-5"     # for roles that say just "copilot"
 instructions = "~/.config/github-copilot/intellij/global-copilot-instructions.md"  # appended to Copilot prompts if it exists
 excluded_tools = ["task", "run_dynamic_workflow", "dynamic_workflows_manage"]   # no sub-agents
+
+[plugins]                     # Claude Code plugins (skills) Claude workers get; your user settings are not read
+enabled = []                  # e.g. ["ponytail@ponytail", "mattpocock-skills@claude-plugins-official"]
 "#
 }
 
@@ -581,7 +616,10 @@ impl Policy {
             "Read" | "NotebookRead" | "Grep" | "Glob" | "LS" => {
                 let path = field("file_path").or_else(|| field("notebook_path")).or_else(|| field("path"));
                 match path {
-                    Some(p) if !is_inside(&resolve(repo, p), repo) => access(self.read.outside_repo, "reading outside the repository"),
+                    Some(p) if !is_inside(&resolve(repo, p), repo) => match self.related_of(&resolve(repo, p)) {
+                        Some(dir) => Verdict::Allow(format!("read inside related repo {}", dir.display())),
+                        None => access(self.read.outside_repo, "reading outside the repository"),
+                    },
                     _ => Verdict::Allow("read inside the repository".into()),
                 }
             }
@@ -590,7 +628,7 @@ impl Policy {
                 let Some(p) = field("file_path").or_else(|| field("notebook_path")) else {
                     return Verdict::Deny("write without a file path".into());
                 };
-                write_verdict(role, &resolve(repo, p), repo)
+                write_verdict(role, &resolve(repo, p), repo, &self.extra_read)
             }
             "Bash" => self.bash(field("command").unwrap_or_default(), repo),
             "WebFetch" | "WebSearch" => access(self.web.access, "web access"),
@@ -626,6 +664,11 @@ impl Policy {
         }
     }
 
+    /// The related repo `path` lies in, if any.
+    fn related_of(&self, path: &Path) -> Option<&PathBuf> {
+        self.extra_read.iter().find(|dir| is_inside_or_same(path, dir))
+    }
+
     fn bash(&self, command: &str, repo: &Path) -> Verdict {
         let words: Vec<&str> =
             command.split(|c: char| c.is_whitespace() || ";|&()`".contains(c)).filter(|w| !w.is_empty()).collect();
@@ -649,7 +692,7 @@ impl Policy {
             while i < plain.len() && plain[i].starts_with('-') {
                 if plain[i] == "-C" {
                     match plain.get(i + 1) {
-                        Some(dir) if !is_inside_or_same(&resolve(repo, dir), repo) => {
+                        Some(dir) if !is_inside_or_same(&resolve(repo, dir), repo) && self.related_of(&resolve(repo, dir)).is_none() => {
                             return access(self.read.outside_repo, "git in a directory outside the repository");
                         }
                         _ => {}
@@ -728,7 +771,7 @@ pub fn in_scope(scope: &[String], rel: &str) -> bool {
     })
 }
 
-fn write_verdict(role: Role, path: &Path, repo: &Path) -> Verdict {
+fn write_verdict(role: Role, path: &Path, repo: &Path, related: &[PathBuf]) -> Verdict {
     let tasks = repo.join(".ai-tasks");
     if path == policy_path(repo) {
         return Verdict::Deny("Agents may not change the Kormilant policy.".into());
@@ -746,6 +789,18 @@ fn write_verdict(role: Role, path: &Path, repo: &Path) -> Verdict {
                     "The {} may write only task docs (.ai-tasks/<slug>.md), not source files.",
                     role.as_str()
                 ))
+            }
+        }
+        Role::Chat => {
+            let is_task_doc = path.parent() == Some(tasks.as_path()) && path.extension().is_some_and(|e| e == "md");
+            if is_task_doc {
+                Verdict::Allow("task doc in .ai-tasks/".into())
+            } else if is_inside(path, &repo.join(".git")) {
+                Verdict::Deny("Agents may not write inside .git/.".into())
+            } else if is_inside(path, repo) || related.iter().any(|d| is_inside(path, d)) {
+                Verdict::Ask
+            } else {
+                Verdict::Deny("Writes outside the repository and its related repos are not allowed.".into())
             }
         }
         Role::Implementer => {
@@ -809,8 +864,9 @@ fn is_inside(path: &Path, dir: &Path) -> bool {
 pub const OUT_OF_SCOPE: &str = "outside the task scope";
 
 /// PreToolUse hook answer for `kormilant-guard`. Never fails open: any error asks the human.
-pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, hook_input: &str) -> String {
-    let (decision, reason) = match decide_hook(repo, role, slug, hook_input) {
+/// `read_dirs`: the task's related repos, readable like `repo`.
+pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, read_dirs: &[PathBuf], hook_input: &str) -> String {
+    let (decision, reason) = match decide_hook(repo, role, slug, read_dirs, hook_input) {
         Ok(Verdict::Allow(rule)) => ("allow", rule),
         Ok(Verdict::Deny(reason)) => ("deny", reason),
         Ok(Verdict::Ask) => ("ask", "Kormilant asks the human supervisor.".to_string()),
@@ -826,11 +882,12 @@ pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, hook_input: &s
     .to_string()
 }
 
-fn decide_hook(repo: &Path, role: Role, slug: Option<&str>, hook_input: &str) -> anyhow::Result<Verdict> {
+fn decide_hook(repo: &Path, role: Role, slug: Option<&str>, read_dirs: &[PathBuf], hook_input: &str) -> anyhow::Result<Verdict> {
     let v: Value = serde_json::from_str(hook_input).context("hook input is not JSON")?;
     let tool = v.get("tool_name").and_then(Value::as_str).context("hook input has no tool_name")?;
     let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
-    let policy = Policy::load(repo)?;
+    let mut policy = Policy::load(repo)?;
+    policy.extra_read = read_dirs.to_vec();
     Ok(match slug {
         Some(slug) => policy.evaluate_task(role, tool, &input, repo, slug),
         None => policy.evaluate(role, tool, &input, repo),
@@ -1014,6 +1071,34 @@ mod tests {
     }
 
     #[test]
+    fn chat_writes_task_docs_and_asks_for_the_rest() {
+        let p = Policy { extra_read: vec![PathBuf::from("/work/lib")], ..Policy::default() };
+        let w = |path: &str| eval(&p, Role::Chat, "Edit", json!({ "file_path": path }));
+        assert!(matches!(w("/work/repo/.ai-tasks/T-1.md"), Verdict::Allow(_)));
+        assert_eq!(w("/work/repo/src/a.rs"), Verdict::Ask);
+        assert_eq!(w("/work/lib/src/x.rs"), Verdict::Ask);
+        assert!(matches!(w("/work/repo/.ai-tasks/policy.toml"), Verdict::Deny(_)));
+        assert!(matches!(w("/work/repo/.ai-tasks/runs/T/x.md"), Verdict::Deny(_)));
+        assert!(matches!(w("/work/repo/.git/config"), Verdict::Deny(_)));
+        assert!(matches!(w("/etc/hosts"), Verdict::Deny(_)));
+        assert_eq!("chat".parse::<Role>().unwrap(), Role::Chat);
+        assert_eq!(Roles::default().worker(Role::Chat), Worker::claude());
+    }
+
+    #[test]
+    fn related_repos_are_readable_not_writable() {
+        let p = Policy { extra_read: vec![PathBuf::from("/work/lib")], ..Policy::default() };
+        assert!(matches!(eval(&p, Role::Analyst, "Read", json!({ "file_path": "/work/lib/src/x.rs" })), Verdict::Allow(_)));
+        assert!(matches!(eval(&p, Role::Analyst, "Grep", json!({ "pattern": "x", "path": "/work/lib" })), Verdict::Allow(_)));
+        assert_eq!(eval(&p, Role::Analyst, "Read", json!({ "file_path": "/work/library/x" })), Verdict::Ask, "a sibling with the same prefix is not related");
+        assert!(matches!(bash(&p, "git -C /work/lib log"), Verdict::Allow(_)));
+        assert!(matches!(bash(&p, "git -C /work/lib push"), Verdict::Deny(_)));
+        for role in [Role::Analyst, Role::Reviewer, Role::Implementer] {
+            assert!(matches!(eval(&p, role, "Edit", json!({ "file_path": "/work/lib/src/x.rs" })), Verdict::Deny(_)), "{role:?}");
+        }
+    }
+
+    #[test]
     fn shell_rules() {
         let p = Policy::default();
         assert!(matches!(bash(&p, "git push origin main"), Verdict::Deny(_)));
@@ -1044,9 +1129,16 @@ mod tests {
     }
 
     #[test]
+    fn installed_plugin_ids() {
+        let json = r#"{"version":2,"plugins":{"ponytail@ponytail":[{"scope":"user"}],"a@b":[]}}"#;
+        assert_eq!(plugin_ids(json), ["a@b", "ponytail@ponytail"]);
+        assert!(plugin_ids("not json").is_empty());
+    }
+
+    #[test]
     fn hook_response_shapes() {
         let decision = |input: &str| -> String {
-            let out: Value = serde_json::from_str(&hook_response(Path::new("/nonexistent/repo"), Role::Analyst, None, input)).unwrap();
+            let out: Value = serde_json::from_str(&hook_response(Path::new("/nonexistent/repo"), Role::Analyst, None, &[], input)).unwrap();
             out["hookSpecificOutput"]["permissionDecision"].as_str().unwrap().to_string()
         };
         assert_eq!(decision(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#), "allow");

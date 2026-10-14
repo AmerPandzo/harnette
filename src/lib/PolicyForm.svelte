@@ -20,6 +20,7 @@
     run: { max_rounds: number };
     delivery: { mode: "none" | "commit" | "push" | "pr"; approval: "ask" | "auto"; branch: string; protected: string[]; branch_at_start: boolean };
     copilot: { model: string; instructions: string; excluded_tools: string[] };
+    plugins: { enabled: string[] };
   };
   type FormData = {
     values: Policy;
@@ -184,6 +185,16 @@
     if (key === "tokens_per_task") return v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : `${Math.round(v / 1000)}k`;
     if (key === "usd_per_task") return `$${v.toFixed(2)}`;
     return `${v} min`;
+  }
+
+  // ---- Plugins: installed ones, plus enabled ids that are no longer installed ----
+  let installed = $state<string[]>([]);
+  invoke<string[]>("list_plugins").then((p) => (installed = p), () => {});
+  const plugins = $derived(form ? [...new Set([...installed, ...form.plugins.enabled])] : []);
+  function togglePlugin(id: string) {
+    if (!form) return;
+    const on = form.plugins.enabled;
+    form.plugins.enabled = on.includes(id) ? on.filter((x) => x !== id) : [...on, id];
   }
 
   const docker = $derived(!!form?.build.requires.includes("docker"));
@@ -434,6 +445,22 @@
         />
       </div>
       <p class="hint">Kormilant never force-pushes.</p>
+    </section>
+
+    <section>
+      <h3>Skills & plugins</h3>
+      {#if plugins.length}
+        <div class="row">
+          {#each plugins as id (id)}
+            <button class="pack" class:on={form.plugins.enabled.includes(id)} onclick={() => togglePlugin(id)} title={id}>
+              {id.split("@")[0]}{#if !installed.includes(id)} (not installed){/if}
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <p class="hint">No Claude Code plugins installed (<code>~/.claude/plugins/</code>).</p>
+      {/if}
+      <p class="hint">Claude workers get only the plugins switched on here (your user settings are not read). Their skills and hooks come with them.</p>
     </section>
 
     {#if roles.some((r) => workerOf(form!.roles[r]).agent === "copilot")}
