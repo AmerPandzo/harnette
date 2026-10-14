@@ -9,7 +9,7 @@
   let { repo, onclose, onstarted }: { repo: string; onclose: () => void; onstarted: () => void } = $props();
 
   let slug = $state("");
-  let model = $state(remembered("kormilant.model", ""));
+  let model = $state(remembered("harnette.model", ""));
   let ticket = $state("");
   let error = $state("");
   let images = $state<Pending[]>([]);
@@ -19,7 +19,7 @@
 
   async function start(ev: Event) {
     ev.preventDefault();
-    remember("kormilant.model", model);
+    remember("harnette.model", model);
     try {
       const paths = await upload(repo, slug.trim(), images);
       await startRun({ repo, slug: slug.trim(), mode: "analyze", ticket, model, images: paths, repos });

@@ -7,7 +7,7 @@ export type Editor = { id: string; name: string };
 
 export const editors = $state({
   list: [] as Editor[],
-  chosen: remembered("kormilant.editor", ""),
+  chosen: remembered("harnette.editor", ""),
   error: "",
 });
 
@@ -29,7 +29,7 @@ export function loadEditors(): Promise<void> {
 
 export function chooseEditor(id: string) {
   editors.chosen = id;
-  remember("kormilant.editor", id);
+  remember("harnette.editor", id);
 }
 
 export const editorName = () => editors.list.find((e) => e.id === editors.chosen)?.name ?? "editor";

@@ -6,7 +6,7 @@ use crate::workspace::Member;
 
 pub fn analyze(slug: &str, ticket: &str) -> String {
     format!(
-        r#"You are the Analyst in a Kormilant run. Analysis only: do not modify any source file.
+        r#"You are the Analyst in a Harnette run. Analysis only: do not modify any source file.
 
 Investigate the repository in the current directory and write the task doc `.ai-tasks/{slug}.md`.
 The doc must be self-contained: the implementer never sees this conversation.
@@ -72,7 +72,7 @@ pub fn refine(slug: &str, message: Option<&str>, past_analysis: Option<&str>) ->
         ),
     };
     format!(
-        r#"You are the Analyst in a Kormilant run, continuing an analysis. Analysis only: do not modify any source file.
+        r#"You are the Analyst in a Harnette run, continuing an analysis. Analysis only: do not modify any source file.
 
 Read `.ai-tasks/{slug}.md`. The human answered Open questions in the app: an answer is the `**Answer:** …` line
 (possibly continued on the following indented lines) under its question. Older docs may have the answer
@@ -104,10 +104,10 @@ pub fn chat(task: Option<&str>, related_repos: &[String]) -> String {
     };
     let related = if related_repos.is_empty() { String::new() } else { related(related_repos, false, &[], Role::Chat) };
     format!(
-        r#"You are chatting with the human inside Kormilant, a control plane for coding agents, in the repository in
+        r#"You are chatting with the human inside Harnette, a control plane for coding agents, in the repository in
 the current directory. {about}
 
-How Kormilant works: each task is `.ai-tasks/<slug>.md` (Problem, Analysis, Proposed fix, Acceptance criteria,
+How Harnette works: each task is `.ai-tasks/<slug>.md` (Problem, Analysis, Proposed fix, Acceptance criteria,
 Open questions, Review log). Its `**Status:**` line is its board column: Analysis, Ready for implementation,
 In review, Changes requested, Done. Runs are done by role agents (analyst writes the doc, implementer changes code,
 reviewer reviews), not by you.
@@ -116,8 +116,8 @@ What you may do: read and search freely; edit task docs in `.ai-tasks/` directly
 ask the human first; git commands that change state are denied.
 
 Proposing board actions: when starting work would help, propose it; the app shows a button and the human decides.
-Write one fenced block per action, with the language `kormilant-action` and one JSON object:
-```kormilant-action
+Write one fenced block per action, with the language `harnette-action` and one JSON object:
+```harnette-action
 {{"action": "run", "slug": "T-1"}}
 ```
 Actions:
@@ -150,7 +150,7 @@ pub fn related(repos: &[String], new_doc: bool, members: &[Member], role: Role) 
     };
     let rules = match role {
         Role::Implementer if !members.is_empty() => {
-            "You may change the member repositories too (Kormilant checkpoints, builds, reviews and delivers them with this task); \
+            "You may change the member repositories too (Harnette checkpoints, builds, reviews and delivers them with this task); \
              the others are read-only. In the task doc, name a member's files `<member>/<path>`."
         }
         Role::Reviewer if !members.is_empty() => {
@@ -166,16 +166,16 @@ pub fn related(repos: &[String], new_doc: bool, members: &[Member], role: Role) 
 
 const COMMON_RULES: &str = "Rules:
 - Run one plain command per Bash call: no pipes, `&&`, `;`, redirects or subshells.
-- Never run git commands that change state (commit, push, reset, stash, checkout, rebase). Kormilant owns git.
+- Never run git commands that change state (commit, push, reset, stash, checkout, rebase). Harnette owns git.
 - If a tool call is denied, read the reason and continue without it.";
 
 pub fn implement(slug: &str, round: u32, build_command: Option<&str>) -> String {
     let build = match build_command {
-        Some(cmd) => format!("When you finish, Kormilant runs `{cmd}` itself and the reviewer sees the result. You may run it yourself to check your work."),
+        Some(cmd) => format!("When you finish, Harnette runs `{cmd}` itself and the reviewer sees the result. You may run it yourself to check your work."),
         None => "No build command is configured; check your work with the tests the task doc names.".to_string(),
     };
     format!(
-        r#"You are the Implementer in a Kormilant run (round {round}).
+        r#"You are the Implementer in a Harnette run (round {round}).
 
 Read `.ai-tasks/{slug}.md` and implement it:
 - If the Review log has open findings (`- [ ] R<N>-<k> …`), fix each one. After fixing one, tick it (`- [x]`)
@@ -183,7 +183,7 @@ Read `.ai-tasks/{slug}.md` and implement it:
 - Otherwise implement the Proposed fix, step by step, within the task's scope. Steps may already be done
   (see Implementation notes and the code): do only what is missing, such as steps marked `(added after decision <n>)`.
 - Update the `## Implementation notes` section: what you changed, where, and where you deviated from the plan and why.
-- Do not change the `**Status:**` line. Kormilant sets it.
+- Do not change the `**Status:**` line. Harnette sets it.
 - Do not edit `.ai-tasks/policy.toml` or anything under `.ai-tasks/runs/`.
 
 {build}
@@ -207,15 +207,15 @@ pub fn review(slug: &str, round: u32, diff_path: &str, build: Option<&BuildSumma
     let date = crate::journal::today();
     let build = match build {
         Some(b) => format!(
-            "Kormilant ran the build `{}`: **{}**. Last lines of its output:\n```\n{}\n```",
+            "Harnette ran the build `{}`: **{}**. Last lines of its output:\n```\n{}\n```",
             b.command,
             if b.ok { "green" } else { "RED" },
             b.tail
         ),
-        None => "No build command is configured, so Kormilant did not run a build.".to_string(),
+        None => "No build command is configured, so Harnette did not run a build.".to_string(),
     };
     format!(
-        r#"You are the Reviewer in a Kormilant run (round {round}). You start fresh: you did not write this change.
+        r#"You are the Reviewer in a Harnette run (round {round}). You start fresh: you did not write this change.
 Do not modify any source file; you may edit only `.ai-tasks/{slug}.md`.
 
 Review the change for `.ai-tasks/{slug}.md`:

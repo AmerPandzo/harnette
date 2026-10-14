@@ -17,7 +17,7 @@
   import { initRunEvents, onRunExit, run, startLoop, startRun } from "$lib/run.svelte";
   import { remember, remembered, type StatusKind, type TaskSummary } from "$lib/types";
 
-  let repoInput = $state(remembered("kormilant.repo", ""));
+  let repoInput = $state(remembered("harnette.repo", ""));
   let repo = $state(""); // the watched, resolved repo
   let repoError = $state("");
   let tasks = $state<TaskSummary[]>([]);
@@ -32,7 +32,7 @@
     chatTask = chat.open || chat.events.length ? chat.task : (selected ?? "");
     tab = "chat";
   }
-  let recent = $state<string[]>(JSON.parse(remembered("kormilant.recentRepos", "[]")));
+  let recent = $state<string[]>(JSON.parse(remembered("harnette.recentRepos", "[]")));
   let showNew = $state(false);
   let repoMenu = $state(false);
   const repoName = (p: string) => p.split("/").filter(Boolean).at(-1) ?? p;
@@ -67,10 +67,10 @@
       repoInput = repo;
       repoError = "";
       selected = null;
-      remember("kormilant.repo", repo);
+      remember("harnette.repo", repo);
       await loadChat(repo);
       recent = [repo, ...recent.filter((r) => r !== repo)].slice(0, 8);
-      remember("kormilant.recentRepos", JSON.stringify(recent));
+      remember("harnette.recentRepos", JSON.stringify(recent));
       await refresh();
     } catch (e) {
       repoError = String(e);
@@ -85,7 +85,7 @@
   async function refine(message = "", images: string[] = []) {
     if (!selectedTask) return;
     try {
-      await startRun({ repo, slug: selectedTask.slug, mode: "refine", model: remembered("kormilant.model", ""), message, images });
+      await startRun({ repo, slug: selectedTask.slug, mode: "refine", model: remembered("harnette.model", ""), message, images });
       tab = "run";
     } catch {
       tab = "run"; // the error shows in the Run view
@@ -108,7 +108,7 @@
   async function runTask(base = "") {
     if (!selectedTask) return;
     try {
-      await startLoop({ repo, slug: selectedTask.slug, model: remembered("kormilant.model", ""), base });
+      await startLoop({ repo, slug: selectedTask.slug, model: remembered("harnette.model", ""), base });
     } catch {}
     tab = "run";
   }
@@ -213,7 +213,7 @@
           <div class="empty">
             <div class="emptyicon"><Icon name="folder" size={22} /></div>
             <h2>Choose a repository</h2>
-            <p>Kormilant reads its tasks from <code>.ai-tasks/</code>.</p>
+            <p>Harnette reads its tasks from <code>.ai-tasks/</code>.</p>
             <button class="primary" onclick={chooseRepo}>Choose folder…</button>
           </div>
         {:else}

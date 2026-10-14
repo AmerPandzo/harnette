@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn saves_and_attaches_images() {
-        let dir = std::env::temp_dir().join(format!("kormilant-attach-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("harnette-attach-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let a = save(&dir, "T-1", "image/png", b"\x89PNG fake").unwrap();

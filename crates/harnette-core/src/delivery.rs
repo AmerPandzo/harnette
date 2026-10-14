@@ -103,7 +103,7 @@ fn latest_review(md: &str) -> String {
     }
 }
 
-/// The user's own git: no Kormilant identity, so commits are authored by the user.
+/// The user's own git: no Harnette identity, so commits are authored by the user.
 fn user_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
     let out = Command::new("git").arg("-C").arg(repo).args(args).output().context("could not run git")?;
     if !out.status.success() {
@@ -183,9 +183,9 @@ pub fn plan(repo: &Path, slug: &str, policy: &Policy) -> anyhow::Result<Plan> {
     let problem = section(&md, "Problem");
     let first_para = problem.split("\n\n").next().unwrap_or("").trim().to_string();
     let texts = Texts {
-        message: format!("{pr_title}\n\n{first_para}\n\nKormilant task: {slug}"),
+        message: format!("{pr_title}\n\n{first_para}\n\nHarnette task: {slug}"),
         pr_body: format!(
-            "## Problem\n\n{problem}\n\n## Implementation notes\n\n{}\n\n## Review\n\n{}\n\n---\nDelivered by Kormilant (task `{slug}`).",
+            "## Problem\n\n{problem}\n\n## Implementation notes\n\n{}\n\n## Review\n\n{}\n\n---\nDelivered by Harnette (task `{slug}`).",
             section(&md, "Implementation notes"),
             latest_review(&md)
         ),
@@ -216,7 +216,7 @@ struct Texts {
 /// One repository's part of the plan: its build gate, base, changed files, branch and commands.
 fn repo_plan(repo: &Path, name: &str, slug: &str, d: &Delivery, build_command: Option<&String>, texts: &Texts) -> anyhow::Result<Plan> {
     if let Some(command) = build_command {
-        let last = read_last_build(repo, slug).with_context(|| format!("No Kormilant build recorded for {slug}; run the loop first."))?;
+        let last = read_last_build(repo, slug).with_context(|| format!("No Harnette build recorded for {slug}; run the loop first."))?;
         if !last.ok {
             bail!("The last build (`{}`) is red.", last.command);
         }
@@ -331,7 +331,7 @@ fn execute_one(repo: &Path, plan: &Plan) -> anyhow::Result<Outcome> {
         outcome.pushed = true;
     }
     if plan.mode == "pr" {
-        let body = std::env::temp_dir().join(format!("kormilant-pr-{}-{}.md", plan.slug, std::process::id()));
+        let body = std::env::temp_dir().join(format!("harnette-pr-{}-{}.md", plan.slug, std::process::id()));
         std::fs::write(&body, &plan.pr_body)?;
         let out = Command::new("gh")
             .current_dir(repo)
@@ -412,7 +412,7 @@ mod tests {
         assert!(err(&policy(DeliveryMode::Commit, None)).contains("R1-1"));
 
         tasks::write(&repo, "T-1", DONE).unwrap();
-        assert!(err(&policy(DeliveryMode::Commit, Some("make test"))).contains("No Kormilant build"));
+        assert!(err(&policy(DeliveryMode::Commit, Some("make test"))).contains("No Harnette build"));
         green(&repo, "make test");
         assert!(plan(&repo, "T-1", &policy(DeliveryMode::Commit, Some("make test"))).is_ok());
         assert!(err(&policy(DeliveryMode::Commit, Some("make check"))).contains("build command is now"));
@@ -487,7 +487,7 @@ mod tests {
             p.commands,
             vec![
                 "create branch ai/T-1 there and switch to it (working tree untouched)",
-                "commit the task's changes since refs/kormilant/T-1/1 (1 file) as 'T-1: Fix the thing'",
+                "commit the task's changes since refs/harnette/T-1/1 (1 file) as 'T-1: Fix the thing'",
                 "git push -u origin ai/T-1",
                 "gh pr create --head ai/T-1 --title 'T-1: Fix the thing' --body-file <PR body>",
             ]

@@ -12,7 +12,7 @@
 
   let input = $state("");
   const home = (p: string) => p.replace(/^\/Users\/[^/]+/, "~");
-  const recent = $derived((JSON.parse(remembered("kormilant.recentRepos", "[]")) as string[]).filter((r) => r !== repo).map(home));
+  const recent = $derived((JSON.parse(remembered("harnette.recentRepos", "[]")) as string[]).filter((r) => r !== repo).map(home));
   const id = `repos-${Math.random().toString(36).slice(2)}`;
 
   function set(next: string[]) {

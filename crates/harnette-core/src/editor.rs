@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn only_files_inside_the_repo() {
-        let root = std::env::temp_dir().join(format!("kormilant-editor-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("harnette-editor-{}", std::process::id()));
         let repo = root.join("repo");
         fs::create_dir_all(repo.join("src")).unwrap();
         fs::write(repo.join("src/a.rs"), "").unwrap();

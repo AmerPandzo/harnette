@@ -1,23 +1,23 @@
-//! Tauri shell: exposes kormilant-core runs and task docs to the web UI
+//! Tauri shell: exposes harnette-core runs and task docs to the web UI
 //! as commands plus `run-event` / `tasks-changed` events.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use kormilant_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
-use kormilant_core::review::{Criterion, Finding, parse_criteria, parse_findings};
-use kormilant_core::tasks::{self, Question, StatusKind, TaskSummary, expand_home};
-use kormilant_core::watch::{TaskWatcher, watch_tasks};
-use kormilant_core::attach;
-use kormilant_core::workspace;
-use kormilant_core::delivery::{self, Outcome, Plan};
-use kormilant_core::editor::{self, Editor};
-use kormilant_core::git::{self, Checkpoint};
-use kormilant_core::ledger::{self, Entry, Summary};
-use kormilant_core::watchdog::{Action, PriorUsage, Watchdog};
-use kormilant_core::claude::{self, CHAT_SLUG};
-use kormilant_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
+use harnette_core::policy::{Detected, Policy, apply_values, detect_build, policy_path, suggested_toml};
+use harnette_core::review::{Criterion, Finding, parse_criteria, parse_findings};
+use harnette_core::tasks::{self, Question, StatusKind, TaskSummary, expand_home};
+use harnette_core::watch::{TaskWatcher, watch_tasks};
+use harnette_core::attach;
+use harnette_core::workspace;
+use harnette_core::delivery::{self, Outcome, Plan};
+use harnette_core::editor::{self, Editor};
+use harnette_core::git::{self, Checkpoint};
+use harnette_core::ledger::{self, Entry, Summary};
+use harnette_core::watchdog::{Action, PriorUsage, Watchdog};
+use harnette_core::claude::{self, CHAT_SLUG};
+use harnette_core::{LoopConfig, Mode, RunConfig, RunEvent, Session, start_loop as start_core_loop, start_single};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
@@ -41,7 +41,7 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 }
 
 fn ledger_path(app: &AppHandle) -> PathBuf {
-    app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("kormilant")).join("usage.jsonl")
+    app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("harnette")).join("usage.jsonl")
 }
 
 fn now_ms() -> u64 {
@@ -121,7 +121,7 @@ fn chat_sink(app: AppHandle, repo: String, slug: String, chat: u64, dog: Watchdo
             other => dog.lock().unwrap().observe(other, Instant::now()),
         };
         if let RunEvent::PermissionAsk { tool, summary, .. } = &e {
-            notify(&app, &format!("Kormilant chat: allow {tool}?"), summary);
+            notify(&app, &format!("Harnette chat: allow {tool}?"), summary);
         }
         let _ = app.emit("chat-event", ChatEvent { chat, event: &e });
         for alarm in observed {
@@ -131,7 +131,7 @@ fn chat_sink(app: AppHandle, repo: String, slug: String, chat: u64, dog: Watchdo
                 Action::Pause => format!("{} Stopped this answer; your next message continues the chat.", alarm.message),
                 Action::Stop => format!("{} Ended the chat.", alarm.message),
             };
-            notify(&app, "Kormilant chat: budget", &message);
+            notify(&app, "Harnette chat: budget", &message);
             let event = RunEvent::Alarm { alarm: alarm.kind, message, action: action.into() };
             let _ = app.emit("chat-event", ChatEvent { chat, event: &event });
             let handle = app.state::<AppState>().chat.lock().unwrap().as_ref().filter(|c| c.id == chat).map(|c| c.handle.clone());
@@ -152,20 +152,20 @@ fn on_event(app: &AppHandle, event: RunEvent) {
     match &event {
         RunEvent::Alarm { message, action, .. } => {
             let title = match action.as_str() {
-                "pause" => "Kormilant: paused",
-                "stop" => "Kormilant: stopped",
-                _ => "Kormilant: warning",
+                "pause" => "Harnette: paused",
+                "stop" => "Harnette: stopped",
+                _ => "Harnette: warning",
             };
             notify(app, title, message);
         }
-        RunEvent::PermissionAsk { tool, summary, .. } => notify(app, &format!("Kormilant: allow {tool}?"), summary),
-        RunEvent::Build { ok: false, command, .. } => notify(app, "Kormilant: build is red", command),
-        RunEvent::DeliveryReady { mode, branch, .. } => notify(app, "Kormilant: ready to deliver", &format!("{mode} to {branch}: approve in the app")),
+        RunEvent::PermissionAsk { tool, summary, .. } => notify(app, &format!("Harnette: allow {tool}?"), summary),
+        RunEvent::Build { ok: false, command, .. } => notify(app, "Harnette: build is red", command),
+        RunEvent::DeliveryReady { mode, branch, .. } => notify(app, "Harnette: ready to deliver", &format!("{mode} to {branch}: approve in the app")),
         RunEvent::Delivered { branch, pr_url, .. } => {
-            notify(app, "Kormilant: delivered", pr_url.as_deref().unwrap_or(branch));
+            notify(app, "Harnette: delivered", pr_url.as_deref().unwrap_or(branch));
         }
         RunEvent::SessionEnded { ok, summary } => {
-            notify(app, if *ok { "Kormilant: finished" } else { "Kormilant: stopped" }, summary);
+            notify(app, if *ok { "Harnette: finished" } else { "Harnette: stopped" }, summary);
         }
         _ => {}
     }
@@ -529,7 +529,7 @@ fn save_answers(repo: String, slug: String, answers: Vec<(usize, String)>) -> Re
 /// Claude Code plugins installed on this machine, for the policy's `[plugins]` checkboxes.
 #[tauri::command]
 fn list_plugins() -> Vec<String> {
-    kormilant_core::policy::installed_plugins()
+    harnette_core::policy::installed_plugins()
 }
 
 #[tauri::command]
@@ -580,7 +580,7 @@ fn read_policy(repo: String) -> Result<(String, bool), String> {
     }
 }
 
-/// Validates before writing, so a typo never reaches kormilant-guard.
+/// Validates before writing, so a typo never reaches harnette-guard.
 #[tauri::command]
 fn save_policy(repo: String, text: String) -> Result<(), String> {
     Policy::from_toml(&text).map_err(err)?;

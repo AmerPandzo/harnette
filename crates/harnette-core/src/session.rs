@@ -48,7 +48,7 @@ impl Session {
     }
 
     pub async fn note(&self, text: &str, images: &[String]) -> anyhow::Result<()> {
-        self.current().context("No agent is running right now (Kormilant may be building).")?.note(text, images).await
+        self.current().context("No agent is running right now (Harnette may be building).")?.note(text, images).await
     }
 
     pub fn stop(&self) {
@@ -61,7 +61,7 @@ impl Session {
     }
 
     /// The app is quitting: cancel the session and kill the agent synchronously, so no agent
-    /// (running or paused) outlives Kormilant.
+    /// (running or paused) outlives Harnette.
     pub fn shutdown(&self) {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         if let Some(h) = self.current() {
@@ -345,11 +345,11 @@ pub fn next_step(status: StatusKind) -> Step {
     }
 }
 
-/// The status after a review, enforcing the build gate. Returns the status and why Kormilant overrode it.
+/// The status after a review, enforcing the build gate. Returns the status and why Harnette overrode it.
 pub fn gate_status(reviewer: StatusKind, build_ok: Option<bool>) -> (StatusKind, Option<String>) {
     match reviewer {
         StatusKind::Done if build_ok == Some(false) => {
-            (StatusKind::ChangesRequested, Some("The build is red; Kormilant does not accept Done.".into()))
+            (StatusKind::ChangesRequested, Some("The build is red; Harnette does not accept Done.".into()))
         }
         StatusKind::Done | StatusKind::ChangesRequested => (reviewer, None),
         _ => (StatusKind::ChangesRequested, Some("The reviewer did not set Done or Changes requested.".into())),
@@ -513,7 +513,7 @@ async fn build_all(
     sink: &Sink,
 ) -> anyhow::Result<Vec<Built>> {
     let mut out = Vec::new();
-    if let Some(b) = kormilant_build(session, policy, repo, None, slug, round, run_dir, sink).await? {
+    if let Some(b) = harnette_build(session, policy, repo, None, slug, round, run_dir, sink).await? {
         out.push(b);
     }
     for m in members {
@@ -521,7 +521,7 @@ async fn build_all(
             break;
         }
         let member_policy = Policy::load(&m.path).with_context(|| format!("member repo {}", m.name))?;
-        if let Some(b) = kormilant_build(session, &member_policy, &m.path, Some(&m.name), slug, round, run_dir, sink).await? {
+        if let Some(b) = harnette_build(session, &member_policy, &m.path, Some(&m.name), slug, round, run_dir, sink).await? {
             out.push(b);
         }
     }
@@ -544,7 +544,7 @@ fn build_summary(builds: &[Built]) -> Option<BuildSummary> {
 
 /// Run a repo's build command, record it for delivery and report it. None when no command is set.
 #[allow(clippy::too_many_arguments)]
-async fn kormilant_build(
+async fn harnette_build(
     session: &Session,
     policy: &Policy,
     repo: &std::path::Path,
@@ -651,7 +651,7 @@ async fn run_loop(
                     return Ok("Stopped by the human.".into());
                 }
                 tasks::set_status(repo, slug, StatusKind::InReview)?;
-                sink(RunEvent::StatusChanged { to: StatusKind::InReview.label().into(), by: "kormilant".into(), reason: None });
+                sink(RunEvent::StatusChanged { to: StatusKind::InReview.label().into(), by: "harnette".into(), reason: None });
             }
             Step::Review => {
                 let review_round = round.max(1);
@@ -717,7 +717,7 @@ async fn run_loop(
                 if status != reviewer_status {
                     tasks::set_status(repo, slug, status)?;
                 }
-                let by = if reason.is_some() { "kormilant" } else { "reviewer" };
+                let by = if reason.is_some() { "harnette" } else { "reviewer" };
                 sink(RunEvent::StatusChanged { to: status.label().into(), by: by.into(), reason });
                 if status == StatusKind::ChangesRequested && rounds_done >= max_rounds {
                     return Ok(format!("Changes requested after {rounds_done} round(s); run.max_rounds reached."));

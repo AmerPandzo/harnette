@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/kormilant-core", "src-tauri"]
+members = ["crates/harnette-core", "src-tauri"]
 resolver = "3"
 
 [profile.release]

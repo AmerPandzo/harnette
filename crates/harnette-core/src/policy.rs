@@ -1,5 +1,5 @@
 //! Guardrail policy, loaded from `<repo>/.ai-tasks/policy.toml` over built-in defaults.
-//! The same `evaluate` runs in `kormilant-guard` (every tool call) and in the host handler (asks),
+//! The same `evaluate` runs in `harnette-guard` (every tool call) and in the host handler (asks),
 //! so both layers always agree.
 
 use std::path::{Component, Path, PathBuf};
@@ -378,7 +378,7 @@ fn plugin_ids(json: &str) -> Vec<String> {
     ids
 }
 
-/// How Kormilant runs Copilot CLI.
+/// How Harnette runs Copilot CLI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CopilotCfg {
@@ -387,7 +387,7 @@ pub struct CopilotCfg {
     /// Copilot CLI does not read IntelliJ's global instructions; this file is appended to every
     /// Copilot prompt when it exists. Empty = none.
     pub instructions: String,
-    /// Tools hidden from Copilot (sub-agents would bypass the turn-level view Kormilant has).
+    /// Tools hidden from Copilot (sub-agents would bypass the turn-level view Harnette has).
     pub excluded_tools: Vec<String>,
 }
 
@@ -407,7 +407,7 @@ pub fn policy_path(repo: &Path) -> PathBuf {
 
 /// Commented template; parses to `Policy::default()` (tested).
 pub fn default_toml() -> &'static str {
-    r#"# Kormilant policy for this repository. Missing keys use these defaults; a list replaces the default list.
+    r#"# Harnette policy for this repository. Missing keys use these defaults; a list replaces the default list.
 
 [roles]                       # factory of one: the same worker may fill every role
 analyst = "claude"
@@ -680,7 +680,7 @@ impl Policy {
         let words: Vec<&str> =
             command.split(|c: char| c.is_whitespace() || ";|&()`".contains(c)).filter(|w| !w.is_empty()).collect();
         if let Some(verb) = git_verbs(&words).into_iter().find(|v| self.git.denied().contains(v)) {
-            return Verdict::Deny(format!("git {verb} is not allowed for agents; Kormilant handles delivery."));
+            return Verdict::Deny(format!("git {verb} is not allowed for agents; Harnette handles delivery."));
         }
         if SHELL_OPERATORS.iter().any(|op| command.contains(op)) {
             return if self.shell.single_command {
@@ -781,10 +781,10 @@ pub fn in_scope(scope: &[String], rel: &str) -> bool {
 fn write_verdict(role: Role, path: &Path, repo: &Path, related: &[PathBuf], members: &[PathBuf]) -> Verdict {
     let tasks = repo.join(".ai-tasks");
     if path == policy_path(repo) {
-        return Verdict::Deny("Agents may not change the Kormilant policy.".into());
+        return Verdict::Deny("Agents may not change the Harnette policy.".into());
     }
     if is_inside(path, &tasks.join("runs")) {
-        return Verdict::Deny("Run journals are written by Kormilant only.".into());
+        return Verdict::Deny("Run journals are written by Harnette only.".into());
     }
     match role {
         Role::Analyst | Role::Reviewer => {
@@ -877,7 +877,7 @@ fn is_inside(path: &Path, dir: &Path) -> bool {
 /// Prefix of the rule text for an allowed write outside the task scope (adapters raise an alarm on it).
 pub const OUT_OF_SCOPE: &str = "outside the task scope";
 
-/// PreToolUse hook answer for `kormilant-guard`. Never fails open: any error asks the human.
+/// PreToolUse hook answer for `harnette-guard`. Never fails open: any error asks the human.
 /// Directories beyond the repo for one run: related repos (readable) and member repos (writable by the implementer).
 #[derive(Debug, Clone, Default)]
 pub struct RunDirs {
@@ -889,8 +889,8 @@ pub fn hook_response(repo: &Path, role: Role, slug: Option<&str>, dirs: &RunDirs
     let (decision, reason) = match decide_hook(repo, role, slug, dirs, hook_input) {
         Ok(Verdict::Allow(rule)) => ("allow", rule),
         Ok(Verdict::Deny(reason)) => ("deny", reason),
-        Ok(Verdict::Ask) => ("ask", "Kormilant asks the human supervisor.".to_string()),
-        Err(e) => ("ask", format!("kormilant-guard could not decide ({e:#}); asking the human.")),
+        Ok(Verdict::Ask) => ("ask", "Harnette asks the human supervisor.".to_string()),
+        Err(e) => ("ask", format!("harnette-guard could not decide ({e:#}); asking the human.")),
     };
     serde_json::json!({
         "hookSpecificOutput": {
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn suggested_policy_detects_the_build() {
-        let dir = std::env::temp_dir().join(format!("kormilant-detect-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("harnette-detect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("svc")).unwrap();
         assert_eq!(suggested_toml(&dir), default_toml(), "nothing recognised: plain template");
@@ -1031,7 +1031,7 @@ mod tests {
 
     #[test]
     fn edits_outside_the_task_scope_warn_or_block() {
-        let dir = std::env::temp_dir().join(format!("kormilant-scope-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("harnette-scope-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".ai-tasks")).unwrap();
         std::fs::write(dir.join(".ai-tasks/T.md"), "# T\n\n## Proposed fix\n1. Edit `src/a.js`.\n").unwrap();
@@ -1119,8 +1119,8 @@ mod tests {
 
     #[test]
     fn task_scope_covers_member_files() {
-        let dir = std::env::temp_dir().join(format!("kormilant-scope-member-{}", std::process::id()));
-        let lib = std::env::temp_dir().join(format!("kormilant-scope-lib-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("harnette-scope-member-{}", std::process::id()));
+        let lib = std::env::temp_dir().join(format!("harnette-scope-lib-{}", std::process::id()));
         crate::tasks::write(&dir, "T", &format!("Fix `{}/src/a.rs` and `src/main.rs`.", lib.file_name().unwrap().to_string_lossy())).unwrap();
         let mut p = Policy::from_toml("[edits]\non_out_of_scope = \"block\"").unwrap();
         p.extra_write = vec![lib.clone()];

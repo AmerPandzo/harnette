@@ -12,12 +12,12 @@
   let message = $state("");
 
   let dirty = $derived(text !== saved);
-  let mode = $state<"screen" | "toml">(remembered("kormilant.policyMode", "screen") === "toml" ? "toml" : "screen");
+  let mode = $state<"screen" | "toml">(remembered("harnette.policyMode", "screen") === "toml" ? "toml" : "screen");
 
   function setMode(m: "screen" | "toml") {
     if (dirty && !confirm("Discard unsaved TOML changes?")) return;
     mode = m;
-    remember("kormilant.policyMode", m);
+    remember("harnette.policyMode", m);
   }
 
   $effect(() => {
@@ -73,7 +73,7 @@
   {#if message}<p class="ok pad">{message}</p>{/if}
   <textarea bind:value={text} spellcheck="false" oninput={() => (message = "")}></textarea>
   <p class="hint pad">
-    Every tool call an agent makes is checked against this file by <code>kormilant-guard</code>. Agents cannot edit it.
+    Every tool call an agent makes is checked against this file by <code>harnette-guard</code>. Agents cannot edit it.
   </p>
   {/if}
 </div>

@@ -1,4 +1,4 @@
-/* Kormilant design tokens and base controls. Neutral zinc greys, one indigo accent,
+/* Harnette design tokens and base controls. Neutral zinc greys, one indigo accent,
    status colours used only for meaning (green ok, red failed/denied, amber needs attention). */
 :root {
   --bg: #f7f7f8;

@@ -1,10 +1,10 @@
-//! PreToolUse hook for Claude Code: `kormilant-guard --repo <path> --role <role> [--slug <task>] [--read-dir <path>]… [--write-dir <path>]…`.
+//! PreToolUse hook for Claude Code: `harnette-guard --repo <path> --role <role> [--slug <task>] [--read-dir <path>]… [--write-dir <path>]…`.
 //! Reads the hook JSON on stdin and prints the policy decision. Never fails open.
 
 use std::io::Read;
 use std::path::PathBuf;
 
-use kormilant_core::policy::{Role, RunDirs, hook_response};
+use harnette_core::policy::{Role, RunDirs, hook_response};
 
 fn main() {
     let mut repo = None;

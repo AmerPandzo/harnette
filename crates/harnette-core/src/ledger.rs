@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn append_read_and_sum() {
-        let path = std::env::temp_dir().join(format!("kormilant-ledger-{}/usage.jsonl", std::process::id()));
+        let path = std::env::temp_dir().join(format!("harnette-ledger-{}/usage.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
         append(&path, &entry(1, "A", 100, 0.5)).unwrap();
         append(&path, &entry(2, "A", 50, 0.25)).unwrap();

@@ -1,4 +1,4 @@
-// Mirrors kormilant_core types (serde snake_case).
+// Mirrors harnette_core types (serde snake_case).
 
 export type StatusKind = "analysis" | "ready" | "in_review" | "changes_requested" | "done" | "unknown";
 
@@ -109,7 +109,8 @@ export type Ask = { request_id: string; tool: string; summary: string };
 
 export function remembered(key: string, fallback: string): string {
   try {
-    return localStorage.getItem(key) ?? fallback;
+    // Keys saved before the rename from Kormilant (same app id, same storage) still count.
+    return localStorage.getItem(key) ?? localStorage.getItem(key.replace(/^harnette\./, "kormilant.")) ?? fallback;
   } catch {
     return fallback;
   }

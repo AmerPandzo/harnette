@@ -55,7 +55,7 @@
         <ul class="files">
           {#each p.files as f (f)}<li><code>{f}</code></li>{/each}
         </ul>
-        <p class="meta">Kormilant will run{p.repo ? ` in ${p.repo}` : ""}:</p>
+        <p class="meta">Harnette will run{p.repo ? ` in ${p.repo}` : ""}:</p>
         <pre>{p.commands.join("\n")}</pre>
       {/each}
       <p class="meta">Commit message:</p>

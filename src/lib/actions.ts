@@ -1,4 +1,4 @@
-// Board actions the chat proposes as ```kormilant-action {json}``` blocks. Nothing here runs them:
+// Board actions the chat proposes as ```harnette-action {json}``` blocks. Nothing here runs them:
 // the chat view shows a button per action and runs it only on the human's click.
 
 export type ChatAction =
@@ -40,7 +40,8 @@ export function toAction(raw: string): ChatAction | string {
 /** Split assistant text into markdown and action blocks. */
 export function segments(text: string): Segment[] {
   const out: Segment[] = [];
-  const re = /```kormilant-action[^\n]*\n([\s\S]*?)```/g;
+  // kormilant-action: chats saved before the rename.
+  const re = /```(?:harnette|kormilant)-action[^\n]*\n([\s\S]*?)```/g;
   let at = 0;
   for (let m; (m = re.exec(text)); ) {
     if (m.index > at) out.push({ t: "md", text: text.slice(at, m.index) });

@@ -1,8 +1,8 @@
 [package]
-name = "kormilant-core"
+name = "harnette-core"
 version = "0.1.0"
 edition = "2024"
-description = "Kormilant core: agent adapters, policy, journal. No UI code."
+description = "Harnette core: agent adapters, policy, journal. No UI code."
 
 [dependencies]
 anyhow = "1"

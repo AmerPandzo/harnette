@@ -56,7 +56,7 @@ mod tests {
     fn members_are_the_git_repos_among_related_dirs() {
         let primary = git::tests::temp_repo("ws-primary");
         let member = git::tests::temp_repo("ws-member");
-        let plain = std::env::temp_dir().join(format!("kormilant-ws-plain-{}", std::process::id()));
+        let plain = std::env::temp_dir().join(format!("harnette-ws-plain-{}", std::process::id()));
         std::fs::create_dir_all(&plain).unwrap();
         let doc = format!("# T\n\n**Status:** Ready for implementation\n\n**Repos:** {}, {}\n", member.display(), plain.display());
         tasks::write(&primary, "T", &doc).unwrap();

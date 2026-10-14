@@ -444,7 +444,7 @@
           }}
         />
       </div>
-      <p class="hint">Kormilant never force-pushes.</p>
+      <p class="hint">Harnette never force-pushes.</p>
     </section>
 
     <section>

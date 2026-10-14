@@ -1,18 +1,18 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Kormilant",
+  "productName": "Harnette",
   "version": "0.1.0",
   "identifier": "dev.kormilant.app",
   "build": {
-    "beforeDevCommand": "cargo build -q -p kormilant-core --bin kormilant-guard && npm run dev",
+    "beforeDevCommand": "cargo build -q -p harnette-core --bin harnette-guard && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cargo build -q --release -p kormilant-core --bin kormilant-guard && npm run build",
+    "beforeBuildCommand": "cargo build -q --release -p harnette-core --bin harnette-guard && npm run build",
     "frontendDist": "../build"
   },
   "app": {
     "windows": [
       {
-        "title": "Kormilant",
+        "title": "Harnette",
         "width": 1280,
         "height": 820,
         "minWidth": 960,
@@ -39,7 +39,7 @@
     ],
     "macOS": {
       "files": {
-        "MacOS/kormilant-guard": "../target/release/kormilant-guard"
+        "MacOS/harnette-guard": "../target/release/harnette-guard"
       },
       "minimumSystemVersion": "13.0",
       "signingIdentity": "-"

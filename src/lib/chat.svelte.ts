@@ -29,7 +29,7 @@ export const chat = $state({
 /** Cost before the current process (each process's results count from zero). */
 let usdBase = 0;
 const MAX_SAVED_EVENTS = 400;
-const savedKey = (repo: string) => `kormilant.chat:${repo}`;
+const savedKey = (repo: string) => `harnette.chat:${repo}`;
 
 type Saved = { task: string; sessionId: string; usd: number; events: RunEvent[] };
 

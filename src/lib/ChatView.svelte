@@ -47,7 +47,7 @@
       text = "";
       images = [];
       error = "";
-      await sendChat({ repo, task, text: message, images: paths, model: remembered("kormilant.model", "") });
+      await sendChat({ repo, task, text: message, images: paths, model: remembered("harnette.model", "") });
     } catch (e) {
       error = String(e);
     }
@@ -85,7 +85,7 @@
     return "";
   }
   async function act(key: string, a: ChatAction) {
-    const model = remembered("kormilant.model", "");
+    const model = remembered("harnette.model", "");
     try {
       if (a.action === "move") {
         await invoke("set_task_status", { repo, slug: a.slug, status: a.status });

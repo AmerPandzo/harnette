@@ -1,4 +1,4 @@
-//! Kormilant core: drives agent CLIs, enforces policy, records a journal.
+//! Harnette core: drives agent CLIs, enforces policy, records a journal.
 //! No UI code lives here; the Tauri app and the spike CLI are thin shells over it.
 
 pub mod agent;
