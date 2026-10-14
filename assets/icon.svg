@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Harnette: an H whose crossbar is a harness strap with a ring holding the agent (the amber spark). -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6d6ef0"/>
+      <stop offset="1" stop-color="#3a3aa8"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="spark" cx="0.4" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#ffe2a8"/>
+      <stop offset="1" stop-color="#ffaa33"/>
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#gloss)"/>
+  <g fill="#fff8ec">
+    <rect x="300" y="282" width="84" height="460" rx="42"/>
+    <rect x="640" y="282" width="84" height="460" rx="42"/>
+    <rect x="364" y="476" width="296" height="72" rx="20"/>
+  </g>
+  <circle cx="512" cy="512" r="60" fill="#4b4bc0"/>
+  <circle cx="512" cy="512" r="74" fill="none" stroke="#fff8ec" stroke-width="34"/>
+  <circle cx="512" cy="512" r="36" fill="url(#spark)"/>
+</svg>

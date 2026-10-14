@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon-1024.png" width="160" alt="Harnette icon: an H whose crossbar is a harness strap, with a ring holding an amber spark"></p>
+
 # Harnette
 
 A desktop control plane for AI coding agents. You write the ticket, an analyst agent writes the plan, an implementer
