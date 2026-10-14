@@ -51,7 +51,7 @@ resolve as they do in a terminal.
 **From source:** needs [Rust](https://rustup.rs) and Node.js 20+.
 
 ```sh
-git clone https://github.com/<you>/harnette && cd harnette
+git clone https://github.com/AmerPandzo/harnette && cd harnette
 npm install
 npm run tauri build                     # → target/release/bundle/macos/Harnette.app
 ditto target/release/bundle/macos/Harnette.app /Applications/Harnette.app
