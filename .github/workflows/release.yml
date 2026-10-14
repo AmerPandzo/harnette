@@ -29,7 +29,8 @@ jobs:
           releaseName: Harnette ${{ github.ref_name }}
           releaseBody: |
             Apple Silicon build for macOS 13+. Needs the Claude Code CLI installed and logged in.
-            The app isn't notarized: on first launch right-click it and choose Open, or run
-            `xattr -dr com.apple.quarantine /Applications/Harnette.app`.
+            Download the .dmg and drag Harnette to Applications. The app isn't notarized, so macOS blocks the first launch:
+            run `xattr -dr com.apple.quarantine /Applications/Harnette.app`, or open it once and click Open Anyway in
+            System Settings › Privacy & Security.
           releaseDraft: false
           args: --bundles app,dmg

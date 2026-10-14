@@ -39,11 +39,14 @@ for coding agents.
 and the [GitHub CLI](https://cli.github.com) (`gh`) to open pull requests.
 
 **macOS app:** download `Harnette_<version>_aarch64.dmg` from [Releases](../../releases) and drag Harnette to Applications.
-It's built for Apple Silicon. The app isn't notarized yet, so on first launch right-click it and choose **Open**, or run:
+It's built for Apple Silicon. The app isn't notarized yet, so macOS blocks the first launch. Either run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Harnette.app
 ```
+
+or open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway** next to the Harnette
+message (on macOS 14 and earlier, right-click the app and choose **Open** also works).
 
 Started from Finder, Harnette takes its PATH from your login shell, so `claude`, `copilot`, your build tools and `docker`
 resolve as they do in a terminal.
