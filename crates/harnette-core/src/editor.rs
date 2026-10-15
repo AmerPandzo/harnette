@@ -101,7 +101,7 @@ fn command_for(launch: Launch, app: &Path, file: &Path, line: Option<u32>) -> (P
 pub fn open(repo: &Path, rel: &str, line: Option<u32>, editor: &str) -> anyhow::Result<()> {
     let file = resolve_in_repo(repo, rel)?;
     let (program, args) = if editor == SYSTEM {
-        ("/usr/bin/open".into(), vec![file.display().to_string()])
+        (PathBuf::from(if cfg!(windows) { "explorer" } else { "/usr/bin/open" }), vec![file.display().to_string()])
     } else {
         let k = KNOWN.iter().find(|k| k.id == editor).with_context(|| format!("unknown editor {editor:?}"))?;
         let app = app_path(k.bundle_ids).with_context(|| format!("{} is not installed", k.name))?;

@@ -217,9 +217,23 @@ pub(crate) fn signal(pid: Option<u32>, sig: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Windows has no SIGSTOP/SIGCONT, so pause and resume are unsupported; KILL ends the whole process tree.
 #[cfg(not(unix))]
-pub(crate) fn signal(_pid: Option<u32>, _sig: &str) -> anyhow::Result<()> {
-    bail!("pausing an agent is not supported on this platform yet")
+pub(crate) fn signal(pid: Option<u32>, sig: &str) -> anyhow::Result<()> {
+    if sig != "KILL" {
+        bail!("pausing an agent is not supported on this platform yet");
+    }
+    let pid = pid.context("agent process id unknown")?;
+    let ok = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?
+        .success();
+    if !ok {
+        bail!("could not kill the agent");
+    }
+    Ok(())
 }
 
 async fn write_line(inner: &Inner, value: &Value) -> anyhow::Result<()> {

@@ -1,5 +1,5 @@
-# Push a tag like v0.1.0 (matching "version" in src-tauri/tauri.conf.json) to build the macOS app
-# and attach Harnette_<version>_aarch64.dmg to a GitHub Release.
+# Push a tag like v0.1.0 (matching "version" in src-tauri/tauri.conf.json) to build the macOS and Windows apps
+# and attach Harnette_<version>_aarch64.dmg and Harnette_<version>_x64-setup.exe to a GitHub Release.
 name: Release
 
 on:
@@ -34,3 +34,23 @@ jobs:
             System Settings › Privacy & Security.
           releaseDraft: false
           args: --bundles app,dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      # Bundle settings come from src-tauri/tauri.windows.conf.json (NSIS installer, harnette-guard.exe beside the app).
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Harnette ${{ github.ref_name }}
+          releaseDraft: false

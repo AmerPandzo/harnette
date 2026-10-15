@@ -30,7 +30,7 @@ for coding agents.
 - **Pick the skills agents get.** Switch your installed Claude Code plugins on or off per repo.
 - **Mix agents per role.** For example Copilot CLI implements and Claude reviews, with a fallback to Claude when Copilot runs out of quota.
 
-> **Status: alpha.** Used daily on macOS by its author. Windows and Linux are untested.
+> **Status: alpha.** Used daily on macOS by its author. Windows builds and runs (see below); Linux is untested.
 
 ## Install
 
@@ -51,6 +51,11 @@ message (on macOS 14 and earlier, right-click the app and choose **Open** also w
 Started from Finder, Harnette takes its PATH from your login shell, so `claude`, `copilot`, your build tools and `docker`
 resolve as they do in a terminal.
 
+**Windows app (x64):** download `Harnette_<version>_x64-setup.exe` from [Releases](../../releases) and run it. It
+installs per user, no admin needed. It needs Claude Code for Windows (which needs Git for Windows) and the WebView2
+runtime that ships with Windows 10/11. Not there yet on Windows: pausing a running agent (stop works), and the
+editor and terminal pickers (only "Default app" is offered).
+
 **From source:** needs [Rust](https://rustup.rs) and Node.js 20+.
 
 ```sh
@@ -59,6 +64,8 @@ npm install
 npm run tauri build                     # → target/release/bundle/macos/Harnette.app
 ditto target/release/bundle/macos/Harnette.app /Applications/Harnette.app
 ```
+
+On Windows the same `npm run tauri build` produces `target/release/bundle/nsis/Harnette_<version>_x64-setup.exe`.
 
 ## How to use it
 
