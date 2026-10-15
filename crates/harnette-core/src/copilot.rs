@@ -609,6 +609,7 @@ mod tests {
         assert!(!is_quota_message("All tests pass."));
     }
 
+    #[cfg(unix)]
     fn fake_repo(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("harnette-acp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -617,6 +618,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn fake_cfg(repo: &Path, mode: crate::claude::Mode) -> RunConfig {
         let mut cfg = RunConfig::new(repo, "T", mode);
         cfg.copilot_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_acp.py").into();
@@ -625,6 +627,8 @@ mod tests {
     }
 
     /// The whole ACP path against a scripted agent: policy allow, policy deny, a human ask, a note as the next prompt.
+    // The scripted agent is a Python file run through its shebang, which only works on Unix.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn drives_a_scripted_acp_agent() {
         let repo = fake_repo("work");
@@ -667,6 +671,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    // The scripted agent is a Python file run through its shebang, which only works on Unix.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn reports_an_exhausted_plan() {
         let repo = fake_repo("quota");
@@ -678,6 +684,8 @@ mod tests {
     }
 
     /// App shutdown kills an agent even while it is paused (SIGSTOP ignores SIGTERM, not SIGKILL).
+    // The scripted agent is a Python file run through its shebang, which only works on Unix.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn kill_now_ends_a_paused_agent() {
         let repo = fake_repo("hang");

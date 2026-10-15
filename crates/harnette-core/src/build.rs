@@ -27,9 +27,9 @@ pub fn check_requires(requires: &[String]) -> anyhow::Result<()> {
                 .stderr(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success()),
-            other => std::process::Command::new("sh")
-                .args(["-c", &format!("command -v {other}")])
+            other => which(other)
                 .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success()),
         };
@@ -43,17 +43,48 @@ pub fn check_requires(requires: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn which(tool: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("where");
+    cmd.arg(tool);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn which(tool: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", &format!("command -v {tool}")]);
+    cmd
+}
+
+/// The platform shell running a build command: `sh -c`, or `cmd /C` on Windows.
+fn shell(command: &str) -> Command {
+    #[cfg(windows)]
+    let cmd = {
+        let mut cmd = Command::new("cmd");
+        // raw_arg: cmd.exe does its own quote parsing, so the command must reach it unescaped.
+        cmd.arg("/C").raw_arg(command);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    };
+    cmd
+}
+
 pub fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-/// Runs `command` with `sh -c` in the repo, output to `log`. Cancelled builds count as failed.
+/// Runs `command` with `sh -c` (`cmd /C` on Windows) in the repo, output to `log`. Cancelled builds count as failed.
 pub async fn run_build(repo: &Path, command: &str, log: &Path, cancel: &Notify) -> anyhow::Result<BuildOutcome> {
     let file = File::create(log).with_context(|| format!("creating {}", log.display()))?;
     let started = Instant::now();
-    let mut child = Command::new("sh")
-        .args(["-c", command])
+    let mut child = shell(command)
         .current_dir(repo)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file.try_clone()?))
@@ -84,7 +115,8 @@ mod tests {
         let green = run_build(&dir, "echo hello", &log, &cancel).await.unwrap();
         assert!(green.ok);
         assert_eq!(green.tail, "hello");
-        let red = run_build(&dir, "echo boom >&2; exit 3", &log, &cancel).await.unwrap();
+        let fail = if cfg!(windows) { "echo boom 1>&2 & exit 3" } else { "echo boom >&2; exit 3" };
+        let red = run_build(&dir, fail, &log, &cancel).await.unwrap();
         assert!(!red.ok);
         assert!(red.tail.contains("boom"));
         let _ = std::fs::remove_file(&log);
@@ -92,7 +124,7 @@ mod tests {
 
     #[test]
     fn requires_reports_missing_tools() {
-        assert!(check_requires(&["sh".into()]).is_ok());
+        assert!(check_requires(&["git".into()]).is_ok());
         assert!(check_requires(&["definitely-not-a-tool-xyz".into()]).is_err());
     }
 }

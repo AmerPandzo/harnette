@@ -300,6 +300,8 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(&repo);
         fs::create_dir_all(&repo).unwrap();
         git(&repo, ["init", "-q"]).unwrap();
+        // A global core.autocrlf=true (common on Windows) would rewrite checked-out files to CRLF.
+        git(&repo, ["config", "core.autocrlf", "false"]).unwrap();
         fs::write(repo.join("a.txt"), "one\n").unwrap();
         fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
         git(&repo, ["add", "-A"]).unwrap();
